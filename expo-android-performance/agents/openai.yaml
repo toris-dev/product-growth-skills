@@ -1,0 +1,4 @@
+interface:
+  display_name: "Expo Android Performance"
+  short_description: "Measure and optimize Expo Android performance"
+  default_prompt: "Use $expo-android-performance to diagnose and improve Android performance in my Expo project."

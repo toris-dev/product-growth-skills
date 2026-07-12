@@ -122,6 +122,9 @@ def validate_skill(name: str) -> list[str]:
 
 def main() -> int:
     errors: list[str] = []
+    discovered = {path.parent.name for path in ROOT.glob("*/SKILL.md")}
+    for name in sorted(discovered - EXPECTED):
+        errors.append(f"{name}: unexpected top-level skill directory")
     for name in sorted(EXPECTED):
         errors.extend(validate_skill(name))
     errors.extend(scan_content())

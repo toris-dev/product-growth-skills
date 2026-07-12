@@ -7,6 +7,16 @@ description: Design and implement distinctive Flutter interfaces with responsive
 
 Create an intentional product-specific visual system, then implement only the motion and 2D/3D technology that serves the interaction. Treat accessibility, lifecycle, and frame performance as design constraints.
 
+## Quick start
+
+Read [execution defaults](../shared-references/execution-defaults.md) and select `execute`, `review`, or `plan`. In the default `execute` mode:
+
+1. inspect the Flutter project or brief, routes/state, existing visual system, dependencies, assets, target devices, and the screen's single job;
+2. state an intentional direction tied to the product; ask for a choice only when competing directions would materially change the result;
+3. implement one complete vertical slice with real content and all relevant states;
+4. add purposeful 2D/3D interaction using the smallest capable technology plus reduced-motion and constrained-device fallbacks;
+5. critique the rendered result and validate accessibility, lifecycle, and production-representative frame behavior.
+
 ## Operating rules
 
 - Inspect the product, audience, screen job, existing design system, Flutter version, routes/state architecture, dependencies, assets, target platforms, and device floor before designing.
@@ -81,3 +91,11 @@ Test reduced motion, screen reader/semantics, text scale, contrast, touch target
 
 Provide design intent and tokens, responsive/state map, interaction specification, technology decision and risks, implemented files when authorized, accessibility/fallback behavior, visual evidence, performance evidence, and remaining tradeoffs.
 
+## Definition of done
+
+- The visual direction, tokens, hierarchy, and signature interaction are specific to the product brief.
+- A working vertical slice covers real content plus loading, empty, error, and disabled states as applicable.
+- Gestures and motion handle interruption, lifecycle, and navigation without decorative excess.
+- Reduced motion, semantics/screen reader, text scale, and constrained-device fallbacks remain usable.
+- Representative screenshots or rendered evidence and relevant frame/resource checks are reviewed.
+- The handoff lists implemented files, visual/performance evidence, remaining platform gaps, and any user-only release step.

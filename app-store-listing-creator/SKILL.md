@@ -7,6 +7,16 @@ description: Create or improve Google Play and Apple App Store listing packages,
 
 Build an evidence-based listing package for Google Play, Apple App Store, or both. Produce actual images when an image-generation capability is available and authorized; otherwise produce generation-ready creative briefs and prompts.
 
+## Quick start
+
+Read [execution defaults](../shared-references/execution-defaults.md) and select `execute`, `review`, or `plan`. In the default `execute` mode:
+
+1. inspect the product, existing listing/assets, target stores/locales, and supplied evidence;
+2. create an evidence inventory and store/locale matrix, verifying current official constraints when exact limits matter;
+3. produce the complete positioning, icon direction, screenshot storyboard, copy, localization, and preflight package;
+4. generate requested visual concepts when an image tool is available and authorized;
+5. validate the package, but do not upload or publish it without explicit authorization.
+
 ## Operating rules
 
 - Follow the user's language for deliverables unless a target locale requires another language.
@@ -92,3 +102,11 @@ When experimentation is possible, propose one-variable hypotheses with success a
 
 Creating briefs, copy, and an audit is read-only. Editing design files, generating images, changing store-console content, or uploading assets requires explicit user authorization and the relevant access. Never submit or publish a listing merely because the user requested an audit or creation package.
 
+## Definition of done
+
+- The requested stores and locales have a complete, current field/asset matrix.
+- Every final claim is supported, softened, or explicitly marked as missing evidence.
+- Icon direction, screenshot sequence, store copy, localization notes, and preflight are production-ready.
+- Generated or proposed visuals match the real product and remain legible at target sizes.
+- Current platform constraints and all requested character/asset checks are verified.
+- The handoff follows the shared format and clearly identifies any upload or owner action still required.

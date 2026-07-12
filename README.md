@@ -49,29 +49,60 @@ The skills refer to `shared-references/` through a relative path. When copying a
 
 Start a new Codex task and invoke a skill explicitly with `$skill-name`. Other agents may understand `SKILL.md`, but installation locations and implicit invocation behavior differ by product.
 
-## Usage examples
+## Recommended daily workflow
+
+The default mode is **execute**. For a request to create, improve, optimize, design, implement, or fix something in a supplied project, the selected skill should inspect the current state, make safe in-scope local changes, run relevant verification, and hand off the result.
+
+Override the default explicitly when you want a different outcome:
+
+| Mode | How to request it | Result |
+|---|---|---|
+| `execute` | "Implement this" or no mode on a create/improve/fix request | Inspect, change, verify, and hand off |
+| `review` | "Review only; do not change files" | Inspect and report without local or external changes |
+| `plan` | "Plan this; do not implement yet" | Inspect and produce an implementation-ready plan |
+
+### Copy-ready personal prompts
 
 ```text
-Use $app-store-listing-creator to inspect my app and create Korean and English
-Play Store/App Store icon directions, screenshot storyboards, and final copy.
+Use $app-store-listing-creator to inspect my app evidence, create the complete
+Play Store and App Store package in Korean and English, verify current constraints,
+and report only the upload steps I must perform.
 
-Use $seo-geo-optimizer to audit this website, map search intent and keywords,
-improve GEO-ready content, and create an evidence-based llms.txt if appropriate.
+Use $seo-geo-optimizer to inspect this live site and repository, implement the
+highest-confidence SEO, GEO, keyword, structured-data, and llms.txt improvements,
+verify the rendered result, and report remaining external-console actions.
 
-Use $flutter-android-performance to reproduce this Android scroll jank,
-measure a profile/release baseline, implement the proven fix, and compare results.
+Use $flutter-android-performance to reproduce this Android performance issue,
+capture a profile/release baseline, implement the evidenced fix, rerun the same
+scenario, and report comparable measurements.
 
-Use $flutter-interactive-design to redesign this Flutter onboarding with a
-distinct visual direction, gesture-driven 2D motion, and an accessible 3D moment.
+Use $flutter-interactive-design to inspect this app and implement a complete
+vertical slice with a distinctive visual direction, purposeful 2D/3D interaction,
+reduced-motion fallback, and verified frame performance.
 
-Use $expo-android-performance to diagnose slow Android startup in this Expo app
-without editing native files that prebuild owns, then verify a production build.
+Use $expo-android-performance to reproduce this Android performance issue,
+detect Expo and native ownership, implement the fix in the durable source of truth,
+and verify the same scenario in a production-like build.
 
-Use $expo-interactive-design to create an Expo product viewer with intentional
-native UI, interactive motion, a bounded 3D scene, and low-end/reduced-motion fallbacks.
+Use $expo-interactive-design to inspect this app and implement a complete route
+with intentional native UI, interactive 2D/3D motion, low-end and reduced-motion
+fallbacks, and production-like Android verification.
 ```
 
 Skill instructions are written in English, but each skill tells the agent to return deliverables in the user's language unless the target market or locale requires another language.
+
+### Actions that still require confirmation
+
+The skills can edit and test local project files as part of the requested outcome. They still require explicit authorization before deployment, public upload, store submission, live CMS or external-console changes, paid services, account or permission changes, destructive operations, or contacting other people.
+
+### Expected handoff
+
+```text
+Changed: files, assets, copy, or configuration
+Verified: commands, measurements, rendered evidence, or review checks
+Not verified: missing access, hardware, platforms, or inconclusive evidence
+Your action: only the remaining steps that require you
+```
 
 ## Repository structure
 

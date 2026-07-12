@@ -7,6 +7,16 @@ description: Design and implement distinctive Expo and React Native interfaces w
 
 Build a product-specific native experience and choose the smallest animation or 3D stack that delivers it. Respect Expo workflow ownership, navigation lifecycle, accessibility, and Android performance from the start.
 
+## Quick start
+
+Read [execution defaults](../shared-references/execution-defaults.md) and select `execute`, `review`, or `plan`. In the default `execute` mode:
+
+1. inspect the Expo project or brief, runtime/workflow, routes, native ownership, installed dependencies, assets, target platforms, and the screen's single job;
+2. state a product-specific direction; ask for a choice only when competing directions would materially change the result;
+3. implement one complete route or vertical slice with real content and all relevant states;
+4. add purposeful 2D/3D interaction using the smallest supported stack plus reduced-motion and constrained-device fallbacks;
+5. critique the real app and validate Android in a production-like path, then check other targeted platforms.
+
 ## Operating rules
 
 - Inspect the product, audience, screen job, Expo/React Native versions, workflow, routes, state/data architecture, installed dependencies, app config, assets, target platforms, and device floor before designing.
@@ -90,3 +100,11 @@ Report evidence and untested limits. Do not claim smoothness from simulator or v
 
 Provide design intent/tokens, route and responsive/state map, interaction specification, stack decision and build implications, implemented files when authorized, accessibility/fallback behavior, visual evidence, Android performance evidence, cross-platform notes, and remaining tradeoffs.
 
+## Definition of done
+
+- The visual direction, tokens, hierarchy, and signature interaction are specific to the product brief.
+- A working route or vertical slice covers real content and relevant loading, empty, error, offline, permission, and disabled states.
+- Gestures, navigation focus, thread ownership, cleanup, and asset failure behave coherently.
+- Reduced motion, screen reader, text scale, input alternatives, and constrained-device fallbacks remain usable.
+- Android rendered evidence and production-like performance checks pass, with other targeted platforms checked where available.
+- The handoff lists implemented files, build implications, evidence, remaining platform gaps, and any user-only release step.

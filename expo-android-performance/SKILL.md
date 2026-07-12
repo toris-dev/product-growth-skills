@@ -7,9 +7,19 @@ description: Diagnose, measure, and optimize Android performance in Expo and Rea
 
 Measure the real bottleneck across JavaScript, UI, and native boundaries before changing code. Preserve Expo workflow ownership and prove results in a production-like Android build on representative hardware.
 
+## Quick start
+
+Read [execution defaults](../shared-references/execution-defaults.md) and select `execute`, `review`, or `plan`. In the default `execute` mode:
+
+1. inspect the Expo project, dirty state, SDK/runtime, workflow, native-directory ownership, architecture/engine, routes, dependencies, and build profiles;
+2. make the Android scenario reproducible and capture a production-like baseline;
+3. attribute the bottleneck across JavaScript, UI/rendering, native/startup, data, or artifact layers;
+4. implement the smallest fix in the durable source of truth, preserving config-plugin/prebuild ownership;
+5. rerun the same scenario and report comparable measurements, correctness, and a repeatable regression path.
+
 ## Operating rules
 
-- Default to read-only diagnosis when implementation permission is unclear.
+- Follow the shared mode selection: explicit diagnosis-only requests are read-only; create, improve, optimize, or fix requests against a supplied project default to execution.
 - Detect the actual Expo/React Native workflow and architecture; do not assume managed, prebuild, bare, old, or new architecture.
 - Do not manually edit generated native files when config, a config plugin, or another source of truth will overwrite them.
 - Development-server and debug behavior cannot prove production performance.
@@ -73,3 +83,11 @@ If evidence is noisy or negative, report it; do not cherry-pick.
 
 Provide scenario/environment, ownership/source-of-truth map, baseline, ranked hypotheses, changes or recommendations, comparable before/after results, correctness gates, unverified areas, and a repeatable regression protocol. Do not report a performance win without comparable evidence.
 
+## Definition of done
+
+- The scenario records Expo/React Native runtime, workflow ownership, build profile, and representative device conditions.
+- The bottleneck is attributed with evidence across the correct JS, UI, native, data, or artifact layer.
+- The smallest authorized fix is made in a durable file that prebuild or configuration will not overwrite.
+- Production-like before/after measurements and navigation/lifecycle/accessibility regressions are checked.
+- Noisy, unavailable, or cross-platform evidence is labeled instead of overstated.
+- The handoff lists changed files, measurements, remaining device/platform coverage, and any user-only build or release action.

@@ -7,6 +7,16 @@ description: Audit and improve a website's technical SEO, on-page structure, key
 
 Improve how people, search engines, and answer systems discover and understand a website. Diagnose from evidence, prioritize by impact and confidence, and implement only when the user authorizes changes.
 
+## Quick start
+
+Read [execution defaults](../shared-references/execution-defaults.md) and select `execute`, `review`, or `plan`. In the default `execute` mode:
+
+1. inspect the live site and repository/configuration when available, then establish goals, markets, canonical host, framework, and deployment boundary;
+2. capture the technical, page, intent/keyword, entity, and provenance baseline that matches the request;
+3. produce a prioritized change set and implement the smallest coherent local changes in the durable source of truth;
+4. create or update `llms.txt` only when requested and appropriate;
+5. validate rendered output, directives, links, structured data, and user-visible correctness without publishing or changing external consoles unless explicitly authorized.
+
 ## Operating rules
 
 - Inspect the live site and repository/configuration when available; neither view is complete alone.
@@ -23,7 +33,7 @@ Improve how people, search engines, and answer systems discover and understand a
 - **Keyword/content map:** research intent and map terms/entities to current or proposed pages without manufacturing demand data.
 - **`llms.txt`:** create or review the file as a supplemental discovery aid, with explicit limitations.
 
-If scope is unclear, default to a read-only audit.
+Use the mode selected from the shared execution policy. An explicit audit is read-only; a create, improve, optimize, or fix request against a supplied project defaults to execution.
 
 ## Workflow
 
@@ -91,3 +101,11 @@ Report what was measured, what was inferred, what changed, and what remains unve
 
 Deliver an executive summary, evidence and access notes, prioritized findings, keyword/intent/entity map, page-level change set, `llms.txt` when requested, implemented-file summary when authorized, validation evidence, and monitoring plan. Follow the exact tables in [audit and deliverables](references/audit-and-deliverables.md).
 
+## Definition of done
+
+- The requested site surfaces have an evidence-backed baseline and prioritized findings.
+- Intent, keywords, entities, and target pages are mapped without invented demand data.
+- Authorized local changes are implemented in the durable source of truth and documented.
+- Rendered pages, technical directives, links, and structured data relevant to the change are validated.
+- `llms.txt`, when requested, is accurate, canonical, and presented with its limitations.
+- The handoff separates implemented results, monitoring needs, unverified impact, and any external-console action requiring the user.

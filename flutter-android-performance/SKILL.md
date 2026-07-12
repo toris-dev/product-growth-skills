@@ -7,6 +7,16 @@ description: Diagnose, measure, and optimize Android performance in Flutter appl
 
 Find the limiting resource before changing code. Optimize correctness-preserving release behavior on representative Android hardware and prove outcomes with comparable measurements.
 
+## Quick start
+
+Read [execution defaults](../shared-references/execution-defaults.md) and select `execute`, `review`, or `plan`. In the default `execute` mode:
+
+1. inspect the Flutter/Android project, dirty state, versions, build configuration, dependencies, and reported scenario;
+2. make the scenario reproducible and capture a profile/release baseline on the best available representative device;
+3. localize the bottleneck with evidence and implement the smallest coherent fix;
+4. rerun the same scenario and compare raw samples, median/range, correctness, and side effects;
+5. leave a repeatable regression check and a concise evidence handoff.
+
 ## Operating rules
 
 - Distinguish audit/diagnosis from implementation. Do not edit when the user asked only for analysis.
@@ -79,3 +89,11 @@ Provide:
 
 Do not claim improvement where no comparable before/after evidence exists.
 
+## Definition of done
+
+- The symptom has a reproducible scenario with recorded device, build, and runtime conditions.
+- The bottleneck is supported by profiler, trace, artifact, or source evidence rather than folklore.
+- The smallest authorized fix is implemented without unrelated restructuring.
+- Comparable before/after measurements and correctness/accessibility checks are recorded.
+- Negative, noisy, or unavailable measurements are reported honestly.
+- The handoff identifies changed files, verification, remaining device coverage, and any user-only release action.

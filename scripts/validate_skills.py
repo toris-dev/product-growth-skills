@@ -107,6 +107,16 @@ def validate_skill(name: str) -> list[str]:
         if not metadata.get("description"):
             errors.append(f"{name}/SKILL.md: description is required")
 
+    skill_text = skill_path.read_text(encoding="utf-8")
+    required_content = {
+        "## Quick start": "missing Quick start section",
+        "## Definition of done": "missing Definition of done section",
+        "../shared-references/execution-defaults.md": "missing shared execution policy link",
+    }
+    for required, message in required_content.items():
+        if required not in skill_text:
+            errors.append(f"{name}/SKILL.md: {message}")
+
     interface = interface_values(interface_path)
     for key in REQUIRED_INTERFACE_KEYS:
         if not interface.get(key):

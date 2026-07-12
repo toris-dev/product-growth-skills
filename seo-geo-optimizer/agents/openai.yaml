@@ -1,0 +1,4 @@
+interface:
+  display_name: "SEO & GEO Optimizer"
+  short_description: "Optimize SEO, GEO, llms.txt, and keyword strategy"
+  default_prompt: "Use $seo-geo-optimizer to audit and improve my website's SEO, GEO, llms.txt, and keyword strategy."

@@ -42,9 +42,10 @@ done
 ```bash
 mkdir -p ~/.codex/skills
 cp -R product-growth-skills/seo-geo-optimizer ~/.codex/skills/
+cp -R product-growth-skills/shared-references ~/.codex/skills/
 ```
 
-공통 근거 규칙을 사용하는 스킬은 저장소의 `shared-references/`를 상대 경로로 참조합니다. 전체 기능을 유지하려면 저장소 구조를 보존하거나 해당 공통 폴더도 함께 배치하세요. 가장 안전한 방식은 저장소 전체를 clone한 뒤 필요한 스킬 폴더를 링크하는 것입니다.
+공통 근거 규칙을 사용하는 스킬은 저장소의 `shared-references/`를 상대 경로로 참조합니다. 단일 스킬을 복사할 때도 위 예시처럼 해당 공통 폴더를 같은 부모 디렉터리에 배치하세요. 가장 안전한 방식은 저장소 전체를 clone한 뒤 필요한 스킬 폴더를 링크하는 것입니다.
 
 설치 후 새 Codex 작업에서 `$skill-name`을 명시적으로 호출하세요. 사용 중인 에이전트가 `SKILL.md` 규격을 지원하더라도 설치 위치와 자동 호출 방식은 제품마다 다를 수 있습니다.
 

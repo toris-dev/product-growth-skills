@@ -11,7 +11,7 @@ The repository is documentation-first: each skill teaches an agent how to inspec
 ## Audience and language
 
 - Primary audience: web and mobile developers, designers, product marketers, and growth teams using Codex or another agent that understands `SKILL.md`.
-- Repository documentation: Korean first, with concise English summaries so the project remains approachable internationally.
+- Repository documentation: English throughout so the public GitHub project is accessible internationally.
 - Skill instructions: English, because tool and framework terminology is most stable in English. Output language follows the user's language.
 
 ## Repository architecture

@@ -13,7 +13,7 @@
 - Repository name is exactly `product-growth-skills` and the GitHub repository is public.
 - The license is MIT.
 - Exactly six top-level skill directories are shipped.
-- Root documentation is Korean-first with concise English summaries; skill instructions are English and direct output in the user's language.
+- Root documentation and skill instructions are English; skills direct output in the user's language.
 - Platform dimensions, policies, framework APIs, and performance guidance that may change must be checked against current official sources at task time.
 - Skills must distinguish read-only review from authorized implementation and preserve unrelated changes.
 - Skills must never promise rankings, store approval, performance gains, or AI-search inclusion.
@@ -24,7 +24,7 @@
 
 ## File map
 
-- `README.md`: Korean-first overview, skill catalog, installation, examples, limitations, contribution link.
+- `README.md`: English overview, skill catalog, installation, examples, limitations, and contribution link.
 - `LICENSE`: MIT license text.
 - `CONTRIBUTING.md`: contribution and validation workflow.
 - `.gitignore`: local/editor/cache exclusions.
@@ -275,7 +275,7 @@ Run the official validator, then commit the skill with `add Expo interactive des
 - Consumes: all six validated skills and repository policy files.
 - Produces: installable public repository URL whose remote `main` commit matches local `HEAD`.
 
-- [ ] **Step 1: Write the Korean-first README**
+- [ ] **Step 1: Write the English README**
 
 Include: one-sentence English summary; problem and scope; six-row skill catalog; prerequisites; whole-repository and single-skill installation examples for Codex; explicit `$skill-name` invocation examples; directory tree; behavior and safety limitations; validation commands; contribution link; and MIT license statement. Do not claim compatibility with an agent unless the documented installation model is accurate.
 

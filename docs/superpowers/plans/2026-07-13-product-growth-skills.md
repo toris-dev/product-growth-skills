@@ -65,7 +65,7 @@ EXPECTED = {
 }
 ```
 
-Check that each expected directory has `SKILL.md` and `agents/openai.yaml`; parse the simple frontmatter to confirm `name` equals its directory; require `description`; require quoted `display_name`, `short_description`, and `default_prompt`; confirm the default prompt contains `$<skill-name>`; scan Markdown links to local relative paths; and reject unfinished markers and absolute `/Users/` paths. Ignore `.git` and the design/plan documents when scanning unfinished-marker language because those documents describe the validation rule itself.
+Check that each expected directory has `SKILL.md` and `agents/openai.yaml`; parse the simple frontmatter to confirm `name` equals its directory; require `description`; require quoted `display_name`, `short_description`, and `default_prompt`; confirm the default prompt contains `$<skill-name>`; scan Markdown links to local relative paths; and reject unfinished markers and machine-specific user-home paths. Ignore `.git` and the design/plan documents when scanning unfinished-marker language because those documents describe the validation rule itself.
 
 - [ ] **Step 2: Run the validator and verify the expected failure**
 
@@ -117,7 +117,7 @@ Expected: skill directory, `SKILL.md`, `agents/openai.yaml`, and `references/` e
 
 - [ ] **Step 4: Validate the skill**
 
-Run: `python3 /Users/toris/.codex/skills/.system/skill-creator/scripts/quick_validate.py app-store-listing-creator`
+Run: `python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-creator/scripts/quick_validate.py" app-store-listing-creator`
 
 Expected: `Skill is valid!`
 
@@ -286,7 +286,7 @@ Run:
 ```bash
 python3 scripts/validate_skills.py
 for skill in app-store-listing-creator seo-geo-optimizer flutter-android-performance flutter-interactive-design expo-android-performance expo-interactive-design; do
-  python3 /Users/toris/.codex/skills/.system/skill-creator/scripts/quick_validate.py "$skill"
+  python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-creator/scripts/quick_validate.py" "$skill"
 done
 git diff --check
 ```
@@ -299,7 +299,7 @@ Read each `SKILL.md` against one matching prompt and confirm that an agent can i
 
 - [ ] **Step 4: Audit secrets and machine-specific content**
 
-Run searches for credential-shaped terms, `/Users/`, cache files, and unfinished markers. The only allowed `/Users/` occurrences are in historical design/plan commands, which are not runtime skill content; no secret value may appear anywhere.
+Run searches for credential-shaped terms, machine-specific user-home paths, cache files, and unfinished markers. No secret value or personal absolute path may appear anywhere.
 
 - [ ] **Step 5: Commit implementation documentation**
 

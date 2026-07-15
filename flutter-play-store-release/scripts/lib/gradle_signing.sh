@@ -729,6 +729,38 @@ fprs_gradle_signing_scan() {
       brace_closes = closes
       return opens - closes
     }
+    function structural_code(value,    output, i, character, quote_character, escaped) {
+      output = ""
+      for (i = 1; i <= length(value); i++) {
+        character = substr(value, i, 1)
+        if (character != "\"" && character != "\047") {
+          output = output character
+          continue
+        }
+        quote_character = character
+        escaped = 0
+        for (i = i + 1; i <= length(value); i++) {
+          character = substr(value, i, 1)
+          if (escaped) escaped = 0
+          else if (character == "\\") escaped = 1
+          else if (character == quote_character) break
+        }
+        output = output " "
+      }
+      return output
+    }
+    function android_scope_before(value, signing_position,    prefix, android_prefix) {
+      prefix = substr(value, 1, signing_position - 1)
+      if (android_depth > 0 &&
+          before_depth + brace_delta(prefix) >= android_depth) {
+        return 1
+      }
+      if (match(prefix, /(^|[^A-Za-z0-9_])android[[:space:]]*[{]/)) {
+        android_prefix = substr(prefix, RSTART)
+        if (brace_delta(android_prefix) > 0) return 1
+      }
+      return 0
+    }
     function trim(value) {
       sub(/^[[:space:]]+/, "", value)
       sub(/[[:space:]]+$/, "", value)
@@ -786,6 +818,10 @@ fprs_gradle_signing_scan() {
     {
       code = uncomment($0)
       stripped = trim(code)
+      structural = structural_code(code)
+      visible_signing = match(structural, /(^|[^A-Za-z0-9_])(signingConfig|setSigningConfig)([^A-Za-z0-9_]|$)/)
+      signing_position = RSTART
+      assignment_handled = 0
       before_depth = depth
 
       if (before_depth == 0 && stripped ~ /^android[[:space:]]*\{[[:space:]]*$/) {
@@ -821,9 +857,10 @@ fprs_gradle_signing_scan() {
         if (declaration_name != "") declarations[declaration_name]++
       }
       if (release_depth > 0 && before_depth == release_depth &&
-          (stripped ~ /signingConfig/ || stripped ~ /setSigningConfig/)) {
+          visible_signing) {
         kind = assignment_kind(stripped)
         assignments++
+        assignment_handled = 1
         if (kind == "debug") {
           debug_count++
           debug_line = NR
@@ -831,6 +868,10 @@ fprs_gradle_signing_scan() {
           custom_count++
           custom_name = assignment_name
         } else invalid_count++
+      }
+      if (visible_signing && !assignment_handled &&
+          android_scope_before(structural, signing_position)) {
+        invalid_count++
       }
 
       delta = brace_delta(code)

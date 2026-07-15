@@ -4125,6 +4125,101 @@ GRADLE
     >/dev/null 2>&1 || fail 'Gradle planner did not preserve multiline user text'
 
   case "${FPRS_GRADLE_REVIEW_CASE-all}" in
+    all|compact-signing)
+      if [ "${FPRS_COMPACT_SIGNING_DSL-all}" != kotlin ]; then
+        gradle_compact_source="$GRADLE_ROOT/compact-signing.gradle"
+        cat > "$gradle_compact_source" <<'GRADLE'
+android {
+    buildTypes { release { signingConfig signingConfigs.debug } }
+}
+GRADLE
+        cp "$gradle_compact_source" "$GRADLE_ROOT/compact-signing.expected"
+        if fprs_gradle_signing_candidate groovy "$gradle_compact_source" \
+          "$GRADLE_ROOT/compact-signing.candidate"
+        then
+          fail 'compact Groovy debug signing was merged with generated release signing'
+        else
+          gradle_status=$?
+        fi
+        [ "$gradle_status" -eq 2 ] ||
+          fail 'compact Groovy signing conflict did not return status 2'
+        [ ! -e "$GRADLE_ROOT/compact-signing.candidate" ] ||
+          fail 'compact Groovy signing conflict published a candidate'
+        assert_same_file "$GRADLE_ROOT/compact-signing.expected" \
+          "$gradle_compact_source" \
+          'compact Groovy signing conflict changed the source'
+
+        gradle_unsupported_selector="$GRADLE_ROOT/unsupported-selector.gradle"
+        cat > "$gradle_unsupported_selector" <<'GRADLE'
+android {
+    buildTypes {
+        getByName('release') {
+            signingConfig signingConfigs.debug
+        }
+    }
+}
+GRADLE
+        cp "$gradle_unsupported_selector" \
+          "$GRADLE_ROOT/unsupported-selector.expected"
+        if fprs_gradle_signing_candidate groovy \
+          "$gradle_unsupported_selector" \
+          "$GRADLE_ROOT/unsupported-selector.candidate"
+        then
+          fail 'unsupported release selector retained debug signing during merge'
+        else
+          gradle_status=$?
+        fi
+        [ "$gradle_status" -eq 2 ] ||
+          fail 'unsupported release selector conflict did not return status 2'
+        [ ! -e "$GRADLE_ROOT/unsupported-selector.candidate" ] ||
+          fail 'unsupported release selector conflict published a candidate'
+        assert_same_file "$GRADLE_ROOT/unsupported-selector.expected" \
+          "$gradle_unsupported_selector" \
+          'unsupported release selector conflict changed the source'
+      fi
+
+      if [ "${FPRS_COMPACT_SIGNING_DSL-all}" != groovy ]; then
+        gradle_compact_kotlin_source="$GRADLE_ROOT/compact-signing.gradle.kts"
+        cat > "$gradle_compact_kotlin_source" <<'KOTLIN'
+android {
+    buildTypes { getByName("release") { signingConfig = signingConfigs.getByName("debug") } }
+}
+KOTLIN
+        cp "$gradle_compact_kotlin_source" \
+          "$GRADLE_ROOT/compact-signing-kotlin.expected"
+        if fprs_gradle_signing_candidate kotlin "$gradle_compact_kotlin_source" \
+          "$GRADLE_ROOT/compact-signing-kotlin.candidate"
+        then
+          fail 'compact Kotlin debug signing was merged with generated release signing'
+        else
+          gradle_status=$?
+        fi
+        [ "$gradle_status" -eq 2 ] ||
+          fail 'compact Kotlin signing conflict did not return status 2'
+        [ ! -e "$GRADLE_ROOT/compact-signing-kotlin.candidate" ] ||
+          fail 'compact Kotlin signing conflict published a candidate'
+        assert_same_file "$GRADLE_ROOT/compact-signing-kotlin.expected" \
+          "$gradle_compact_kotlin_source" \
+          'compact Kotlin signing conflict changed the source'
+
+        gradle_compact_decoy="$GRADLE_ROOT/compact-signing-decoy.gradle.kts"
+        cat > "$gradle_compact_decoy" <<'KOTLIN'
+/* android { buildTypes { getByName("release") { signingConfig = signingConfigs.getByName("debug") } } } */
+val compactSigningDocumentation = "android { buildTypes { release { signingConfig signingConfigs.debug } } }"
+android {
+}
+KOTLIN
+        fprs_gradle_signing_candidate kotlin "$gradle_compact_decoy" \
+          "$GRADLE_ROOT/compact-signing-decoy.candidate" ||
+          fail 'compact signing text inside comments or strings caused a conflict'
+        grep -F 'val compactSigningDocumentation' \
+          "$GRADLE_ROOT/compact-signing-decoy.candidate" >/dev/null 2>&1 ||
+          fail 'compact signing string decoy was not preserved'
+      fi
+      ;;
+  esac
+
+  case "${FPRS_GRADLE_REVIEW_CASE-all}" in
     all|slashy-strings)
       cat > "$gradle_conflict_source" <<'GRADLE'
 def slashyDocumentation = /

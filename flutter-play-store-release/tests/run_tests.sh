@@ -1601,6 +1601,10 @@ GRADLE
 inspection_make_flavor_callback() {
   inspection_project=$1
   inspection_callback=$2
+  case "$inspection_callback" in
+    each|forEach) inspection_callback_header="$inspection_callback { flavor ->" ;;
+    *) inspection_callback_header="$inspection_callback {" ;;
+  esac
   inspection_write_pubspec "$inspection_project" dev_dependencies
   inspection_write_wrapper "$inspection_project" 8.7
   cat > "$inspection_project/android/settings.gradle" <<'GRADLE'
@@ -1620,7 +1624,7 @@ android {
         release {
             applicationIdSuffix ".release"
         }
-        $inspection_callback {
+        $inspection_callback_header
             applicationIdSuffix ".common"
         }
     }
@@ -1812,6 +1816,135 @@ $inspection_release_line
 GRADLE
   inspection_append_execution_canary \
     "$inspection_project/android/app/build.gradle" groovy
+}
+
+inspection_make_qualified_write_case() {
+  inspection_project=$1
+  inspection_qualified_case=$2
+  inspection_write_pubspec "$inspection_project" dev_dependencies
+  inspection_write_wrapper "$inspection_project" 8.7
+  cat > "$inspection_project/android/settings.gradle" <<'GRADLE'
+plugins {
+    id "com.android.application" version "8.5.2" apply false
+}
+GRADLE
+  case "$inspection_qualified_case" in
+    default_version)
+      inspection_qualified_body='    defaultConfig.versionCode += calculateOffset()'
+      ;;
+    flavor_container)
+      inspection_qualified_body='    productFlavors.create("release") {
+        applicationIdSuffix = ".release"
+    }'
+      ;;
+    release)
+      inspection_qualified_body='    buildTypes {
+        release {
+            applicationIdSuffix ".store"
+            signingConfig signingConfigs.upload
+        }
+    }
+    buildTypes.release.applicationIdSuffix = suffixFromEnvironment()
+    buildTypes.release.signingConfig = signingConfigs.debug'
+      ;;
+    read_only_flavor_query)
+      inspection_qualified_body='    productFlavors {
+        release {
+            applicationIdSuffix ".release"
+        }
+    }
+    if (productFlavors.findByName("release") != null) {
+        println "release flavor exists"
+    }'
+      ;;
+    flavor_factory_statement)
+      inspection_qualified_body='    productFlavors.create("release")'
+      ;;
+    setter_calls)
+      inspection_qualified_body='    buildTypes {
+        release {
+            applicationIdSuffix ".store"
+            signingConfig signingConfigs.upload
+        }
+    }
+    defaultConfig.versionCode calculateOffset()
+    buildTypes.release.applicationIdSuffix(suffixFromEnvironment())
+    buildTypes.release.signingConfig(signingConfigs.debug)'
+      ;;
+    *) fail 'unknown qualified Gradle write fixture case' ;;
+  esac
+  cat > "$inspection_project/android/app/build.gradle" <<GRADLE
+android {
+    namespace "com.example.qualified"
+    defaultConfig {
+        applicationId "com.example.qualified"
+        versionCode 45
+        versionName "1.2.3"
+    }
+$inspection_qualified_body
+}
+GRADLE
+  inspection_append_execution_canary \
+    "$inspection_project/android/app/build.gradle" groovy
+}
+
+inspection_make_duplicate_properties() {
+  inspection_project=$1
+  inspection_property_source=$2
+  inspection_write_pubspec "$inspection_project" dev_dependencies
+  inspection_write_wrapper "$inspection_project" 8.7
+  cat > "$inspection_project/android/settings.gradle.kts" <<'KOTLIN'
+plugins {
+    id("com.android.application") version "8.5.2" apply false
+}
+KOTLIN
+  case "$inspection_property_source" in
+    gradle)
+      cat > "$inspection_project/android/gradle.properties" <<'PROPERTIES'
+VERSION_NAME=1.0.0
+VERSION_CODE=100
+VERSION_NAME = 2.0.0
+VERSION_CODE = 200
+PROPERTIES
+      inspection_version_code='(project.findProperty("VERSION_CODE") ?: "1").toString().toInt()'
+      inspection_version_name='(project.findProperty("VERSION_NAME") ?: "1.0").toString()'
+      ;;
+    flutter)
+      cat > "$inspection_project/android/local.properties" <<'PROPERTIES'
+flutter.versionName=3.0.0
+flutter.versionCode=300
+flutter.versionName = 4.0.0
+flutter.versionCode = 400
+PROPERTIES
+      inspection_version_code='flutter.versionCode'
+      inspection_version_name='flutter.versionName'
+      ;;
+    continuation)
+      cat > "$inspection_project/android/local.properties" <<'PROPERTIES'
+flutter.versionName=3.0.0
+flutter.versionCode=300
+OTHER_NAME=prefix\
+flutter.versionName=4.0.0
+OTHER_CODE=prefix\
+flutter.versionCode=400
+PROPERTIES
+      inspection_version_code='flutter.versionCode'
+      inspection_version_name='flutter.versionName'
+      ;;
+    *) fail 'unknown duplicate property fixture source' ;;
+  esac
+  cat > "$inspection_project/android/app/build.gradle.kts" <<KOTLIN
+android {
+    namespace = "com.example.properties"
+    defaultConfig {
+        applicationId = "com.example.properties"
+        versionCode = $inspection_version_code
+        versionName = $inspection_version_name
+    }
+}
+KOTLIN
+  inspection_append_execution_canary \
+    "$inspection_project/android/app/build.gradle.kts" kotlin
 }
 
 inspection_assert_no_canary_logs() {
@@ -2106,7 +2239,7 @@ EOF
     '"warnings":["version code expression could not be resolved","version name expression could not be resolved"]' \
     'version mutation warnings changed'
 
-  for callback_name in all configureEach
+  for callback_name in all configureEach each forEach
   do
     callback_project="$INSPECTION_ROOT/$callback_name flavor callback app"
     inspection_make_flavor_callback "$callback_project" "$callback_name"
@@ -2123,6 +2256,90 @@ EOF
       '"warnings":["product flavor declarations could not be resolved"]' \
       "$callback_name flavor callback warning changed"
   done
+
+  qualified_default_project="$INSPECTION_ROOT/qualified default version app"
+  inspection_make_qualified_write_case "$qualified_default_project" default_version
+  inspection_assert_status 'qualified defaultConfig version mutation inspection failed' 0 \
+    "$INSPECTOR" --project "$qualified_default_project" --format json
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"application_id":"com.example.qualified","namespace":"com.example.qualified","application_id_candidates":["com.example.qualified"]' \
+    'qualified defaultConfig version mutation invalidated the application ID'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"version_name":"1.2.3","version_code":null' \
+    'qualified defaultConfig version mutation returned the stale version code'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"warnings":["version code expression could not be resolved"]' \
+    'qualified defaultConfig version mutation warning changed'
+
+  qualified_flavor_project="$INSPECTION_ROOT/qualified flavor container app"
+  inspection_make_qualified_write_case "$qualified_flavor_project" flavor_container
+  inspection_assert_status 'qualified productFlavors container inspection failed' 0 \
+    "$INSPECTOR" --project "$qualified_flavor_project" --format json
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"application_id":null,"namespace":"com.example.qualified","application_id_candidates":[]' \
+    'qualified productFlavors container fell back to the base application ID'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"flavors":[],"selected_flavor":null' \
+    'qualified productFlavors container produced a speculative flavor'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"warnings":["product flavor declarations could not be resolved"]' \
+    'qualified productFlavors container warning changed'
+
+  qualified_release_project="$INSPECTION_ROOT/qualified release writes app"
+  inspection_make_qualified_write_case "$qualified_release_project" release
+  inspection_assert_status 'qualified release write inspection failed' 0 \
+    "$INSPECTOR" --project "$qualified_release_project" --format json
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"application_id":null,"namespace":"com.example.qualified","application_id_candidates":[]' \
+    'qualified release suffix write returned the earlier application ID'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"release_signing":false,"release_uses_debug_signing":false' \
+    'qualified release signing write returned the earlier signing state'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"warnings":["release application ID suffix expression could not be resolved","release signing expression could not be resolved"]' \
+    'qualified release write warnings changed'
+
+  read_only_flavor_project="$INSPECTION_ROOT/read-only qualified flavor query app"
+  inspection_make_qualified_write_case "$read_only_flavor_project" read_only_flavor_query
+  inspection_assert_status 'read-only qualified productFlavors query inspection failed' 0 \
+    "$INSPECTOR" --project "$read_only_flavor_project" --format json --flavor release
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"application_id":"com.example.qualified.release","namespace":"com.example.qualified","application_id_candidates":["com.example.qualified.release"]' \
+    'read-only qualified productFlavors query poisoned release identity'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"flavors":["release"],"selected_flavor":"release"' \
+    'read-only qualified productFlavors query changed flavor discovery'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"warnings":[],"failures":[]' \
+    'read-only qualified productFlavors query emitted a warning'
+
+  factory_statement_project="$INSPECTION_ROOT/qualified flavor factory statement app"
+  inspection_make_qualified_write_case "$factory_statement_project" flavor_factory_statement
+  inspection_assert_status 'qualified productFlavors factory statement inspection failed' 0 \
+    "$INSPECTOR" --project "$factory_statement_project" --format json
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"application_id":null,"namespace":"com.example.qualified","application_id_candidates":[]' \
+    'qualified productFlavors factory statement fell back to the base application ID'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"warnings":["product flavor declarations could not be resolved"]' \
+    'qualified productFlavors factory statement warning changed'
+
+  setter_call_project="$INSPECTION_ROOT/qualified setter call app"
+  inspection_make_qualified_write_case "$setter_call_project" setter_calls
+  inspection_assert_status 'qualified Gradle setter call inspection failed' 0 \
+    "$INSPECTOR" --project "$setter_call_project" --format json
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"application_id":null,"namespace":"com.example.qualified","application_id_candidates":[]' \
+    'qualified Gradle setter call returned the earlier application ID'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"version_name":"1.2.3","version_code":null' \
+    'qualified Gradle setter call returned the earlier version code'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"release_signing":false,"release_uses_debug_signing":false' \
+    'qualified Gradle signing call returned the earlier signing state'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"warnings":["version code expression could not be resolved","release application ID suffix expression could not be resolved","release signing expression could not be resolved"]' \
+    'qualified Gradle setter call warnings changed'
 
   for identity_case in nested inline duplicate mutation
   do
@@ -2171,6 +2388,34 @@ EOF
     inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
       '"warnings":["application ID expression could not be resolved","version code expression could not be resolved","version name expression could not be resolved"]' \
       "$default_case defaultConfig warnings changed"
+  done
+
+  for property_source in gradle flutter continuation
+  do
+    duplicate_property_project="$INSPECTION_ROOT/duplicate $property_source properties app"
+    inspection_make_duplicate_properties "$duplicate_property_project" "$property_source"
+    inspection_assert_status "duplicate $property_source properties inspection failed" 0 \
+      "$INSPECTOR" --project "$duplicate_property_project" --format json
+    case "$property_source" in
+      gradle) expected_duplicate_versions='"version_name":"2.0.0","version_code":"200"' ;;
+      flutter) expected_duplicate_versions='"version_name":"4.0.0","version_code":"400"' ;;
+      continuation) expected_duplicate_versions='"version_name":null,"version_code":null' ;;
+    esac
+    inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+      "$expected_duplicate_versions" \
+      "duplicate $property_source properties did not use the later entries"
+    case "$property_source" in
+      continuation)
+        inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+          '"warnings":["version code expression could not be resolved","version name expression could not be resolved"],"failures":[]' \
+          'continued property lines did not remain conservatively unresolved'
+        ;;
+      *)
+        inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+          '"warnings":[],"failures":[]' \
+          "plain duplicate $property_source properties emitted warnings"
+        ;;
+    esac
   done
 
   compact_java_project="$INSPECTION_ROOT/compact Java compatibility app"

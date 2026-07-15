@@ -4696,6 +4696,331 @@ fastlane_templates() {
   pass 'fastlane_templates'
 }
 
+installer_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+installer_make_archive() {
+  archive_path=$1
+  archive_kind=$2
+  archive_version=${3:-3.38.1}
+  ARCHIVE_PATH=$archive_path ARCHIVE_KIND=$archive_kind \
+    ARCHIVE_VERSION=$archive_version python3 - <<'PY'
+import io, os, tarfile
+
+path = os.environ["ARCHIVE_PATH"]
+kind = os.environ["ARCHIVE_KIND"]
+version = os.environ["ARCHIVE_VERSION"]
+
+def add(tf, name, data=b"", mode=0o644, kind_override=None, linkname="", uid=0):
+    item = tarfile.TarInfo(name)
+    item.mode = mode
+    item.uid = uid
+    item.gid = 0
+    item.uname = ""
+    item.gname = ""
+    if kind_override is not None:
+        item.type = kind_override
+        item.linkname = linkname
+        item.size = 0
+    else:
+        item.size = len(data)
+    tf.addfile(item, None if kind_override is not None else io.BytesIO(data))
+
+with tarfile.open(path, "w:xz", format=tarfile.PAX_FORMAT) as tf:
+    add(tf, "flutter", kind_override=tarfile.DIRTYPE, mode=0o755)
+    add(tf, "flutter/bin", kind_override=tarfile.DIRTYPE, mode=0o755)
+    script = ("#!/bin/sh\n"
+              + ("[ -n \"${FPRS_TEST_FLUTTER_MARKER:-}\" ] && : > \"$FPRS_TEST_FLUTTER_MARKER\"\nsleep 30\n" if kind == "slow" else "")
+              + "printf '%s\\n' '{\"frameworkVersion\":\"" + version + "\"}'\n").encode()
+    add(tf, "flutter/bin/flutter", script,
+        mode=0o4755 if kind == "setuid" else 0o755,
+        uid=2147483648 if kind == "unsafe-owner" else 0)
+    if kind == "absolute":
+        add(tf, "/absolute-escape", b"bad")
+    elif kind == "parent":
+        add(tf, "flutter/../../parent-escape", b"bad")
+    elif kind == "duplicate":
+        add(tf, "flutter/bin/../bin/flutter", b"duplicate")
+    elif kind == "symlink":
+        add(tf, "flutter/escape", kind_override=tarfile.SYMTYPE,
+            linkname="../../escape", mode=0o777)
+    elif kind == "hardlink":
+        add(tf, "flutter/hard-escape", kind_override=tarfile.LNKTYPE,
+            linkname="../../escape", mode=0o644)
+    elif kind == "fifo":
+        add(tf, "flutter/fifo", kind_override=tarfile.FIFOTYPE)
+    elif kind == "device":
+        add(tf, "flutter/device", kind_override=tarfile.CHRTYPE)
+    elif kind == "socket":
+        add(tf, "flutter/socket", kind_override=b"s")
+PY
+}
+
+installer_write_manifest() {
+  manifest_path=$1
+  base_url=$2
+  archive_name=$3
+  archive_sha=$4
+  manifest_version=$5
+  manifest_channel=$6
+  manifest_arch=$7
+  manifest_duplicate=${8:-false}
+  MANIFEST_PATH=$manifest_path BASE_URL=$base_url ARCHIVE_NAME=$archive_name \
+    ARCHIVE_SHA=$archive_sha MANIFEST_VERSION=$manifest_version \
+    MANIFEST_CHANNEL=$manifest_channel MANIFEST_ARCH=$manifest_arch \
+    MANIFEST_DUPLICATE=$manifest_duplicate python3 - <<'PY'
+import json, os
+release = {
+    "version": os.environ["MANIFEST_VERSION"],
+    "channel": os.environ["MANIFEST_CHANNEL"],
+    "dart_sdk_arch": os.environ["MANIFEST_ARCH"],
+    "archive": os.environ["ARCHIVE_NAME"],
+    "sha256": os.environ["ARCHIVE_SHA"],
+}
+releases = [release]
+if os.environ["MANIFEST_DUPLICATE"] == "true":
+    releases.append(dict(release))
+with open(os.environ["MANIFEST_PATH"], "w", encoding="utf-8") as handle:
+    json.dump({"base_url": os.environ["BASE_URL"], "releases": releases}, handle)
+PY
+}
+
+installer_expect() {
+  description=$1
+  expected=$2
+  shift 2
+  installer_stdout=$INSTALLER_ROOT/stdout
+  installer_stderr=$INSTALLER_ROOT/stderr
+  set +e
+  FPRS_TEST_MODE=1 "$INSTALLER" "$@" >"$installer_stdout" 2>"$installer_stderr"
+  installer_status=$?
+  set -e
+  if [ "$expected" -eq 0 ]; then
+    [ "$installer_status" -eq 0 ] || {
+      cat "$installer_stderr" >&2
+      fail "$description (expected success, got $installer_status)"
+    }
+  else
+    [ "$installer_status" -ne 0 ] || fail "$description (unexpected success)"
+  fi
+}
+
+flutter_sdk_installer() {
+  INSTALLER=$PACKAGE_ROOT/scripts/install_flutter_sdk.sh
+  INSTALLER_ROOT=$TMP_ROOT/flutter-sdk-installer
+  mkdir -p "$INSTALLER_ROOT/releases/stable/linux"
+  good_archive=$INSTALLER_ROOT/releases/stable/linux/flutter_linux_3.38.1-stable.tar.xz
+  installer_make_archive "$good_archive" good
+  good_sha=$(installer_sha256 "$good_archive")
+  manifest=$INSTALLER_ROOT/releases_linux.json
+  installer_write_manifest "$manifest" "file://$INSTALLER_ROOT" \
+    'releases/stable/linux/flutter_linux_3.38.1-stable.tar.xz' "$good_sha" \
+    3.38.1 stable x64
+
+  destination=$INSTALLER_ROOT/sdk
+  installer_expect 'verified local Flutter archive did not install' 0 \
+    --version 3.38.1 --channel stable --architecture x64 \
+    --destination "$destination" --manifest-url "file://$manifest"
+  [ -x "$destination/bin/flutter" ] || fail 'installed Flutter executable is missing'
+  [ "$("$destination/bin/flutter" --version --machine)" = \
+    '{"frameworkVersion":"3.38.1"}' ] || fail 'installed Flutter version is wrong'
+
+  installer_write_manifest "$manifest" "file://$INSTALLER_ROOT" \
+    'releases/stable/linux/flutter_linux_3.38.1-stable.tar.xz' "$good_sha" \
+    3.38.1 stable x64 true
+  installer_expect 'duplicate manifest match was accepted' 1 \
+    --version 3.38.1 --channel stable --architecture x64 \
+    --destination "$INSTALLER_ROOT/duplicate-sdk" --manifest-url "file://$manifest"
+
+  installer_write_manifest "$manifest" "file://$INSTALLER_ROOT" \
+    'releases/stable/linux/flutter_linux_3.38.1-stable.tar.xz' "$good_sha" \
+    9.9.9 stable x64
+  installer_expect 'missing version was accepted' 1 \
+    --version 3.38.1 --channel stable --architecture x64 \
+    --destination "$INSTALLER_ROOT/missing-sdk" --manifest-url "file://$manifest"
+  installer_write_manifest "$manifest" "file://$INSTALLER_ROOT" \
+    'releases/stable/linux/flutter_linux_3.38.1-stable.tar.xz' "$good_sha" \
+    3.38.1 stable arm64
+  installer_expect 'wrong architecture was accepted' 1 \
+    --version 3.38.1 --channel stable --architecture x64 \
+    --destination "$INSTALLER_ROOT/arch-sdk" --manifest-url "file://$manifest"
+  installer_write_manifest "$manifest" 'https://attacker.invalid/flutter' \
+    'archive.tar.xz' "$good_sha" 3.38.1 stable x64
+  installer_expect 'hostile base_url was accepted' 1 \
+    --version 3.38.1 --channel stable --architecture x64 \
+    --destination "$INSTALLER_ROOT/base-sdk" --manifest-url "file://$manifest"
+  installer_write_manifest "$manifest" "file://$INSTALLER_ROOT" \
+    '../outside.tar.xz' "$good_sha" 3.38.1 stable x64
+  installer_expect 'relative archive traversal was accepted' 1 \
+    --version 3.38.1 --channel stable --architecture x64 \
+    --destination "$INSTALLER_ROOT/traversal-sdk" --manifest-url "file://$manifest"
+
+  installer_write_manifest "$manifest" "file://$INSTALLER_ROOT" \
+    'releases/stable/linux/flutter_linux_3.38.1-stable.tar.xz' \
+    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+    3.38.1 stable x64
+  installer_expect 'SHA mismatch was accepted' 1 \
+    --version 3.38.1 --channel stable --architecture x64 \
+    --destination "$INSTALLER_ROOT/sha-sdk" --manifest-url "file://$manifest"
+  [ ! -e "$INSTALLER_ROOT/sha-sdk" ] || fail 'SHA failure extracted an SDK'
+
+  partial=$INSTALLER_ROOT/releases/stable/linux/partial.tar.xz
+  dd if="$good_archive" of="$partial" bs=64 count=1 >/dev/null 2>&1
+  installer_write_manifest "$manifest" "file://$INSTALLER_ROOT" \
+    'releases/stable/linux/partial.tar.xz' "$good_sha" 3.38.1 stable x64
+  installer_expect 'partial download was accepted' 1 \
+    --version 3.38.1 --channel stable --architecture x64 \
+    --destination "$INSTALLER_ROOT/partial-sdk" --manifest-url "file://$manifest"
+
+  for hostile_kind in absolute parent duplicate symlink hardlink fifo device socket setuid unsafe-owner
+  do
+    hostile_archive=$INSTALLER_ROOT/releases/stable/linux/$hostile_kind.tar.xz
+    installer_make_archive "$hostile_archive" "$hostile_kind"
+    hostile_sha=$(installer_sha256 "$hostile_archive")
+    installer_write_manifest "$manifest" "file://$INSTALLER_ROOT" \
+      "releases/stable/linux/$hostile_kind.tar.xz" "$hostile_sha" \
+      3.38.1 stable x64
+    installer_expect "unsafe archive member was accepted: $hostile_kind" 1 \
+      --version 3.38.1 --channel stable --architecture x64 \
+      --destination "$INSTALLER_ROOT/$hostile_kind-sdk" --manifest-url "file://$manifest"
+  done
+
+  wrong_version_archive=$INSTALLER_ROOT/releases/stable/linux/wrong-version.tar.xz
+  installer_make_archive "$wrong_version_archive" good 3.38.2
+  wrong_version_sha=$(installer_sha256 "$wrong_version_archive")
+  installer_write_manifest "$manifest" "file://$INSTALLER_ROOT" \
+    'releases/stable/linux/wrong-version.tar.xz' "$wrong_version_sha" \
+    3.38.1 stable x64
+  installer_expect 'extracted version mismatch was accepted' 1 \
+    --version 3.38.1 --channel stable --architecture x64 \
+    --destination "$INSTALLER_ROOT/version-sdk" --manifest-url "file://$manifest"
+
+  preserved=$INSTALLER_ROOT/preserved-sdk
+  mkdir -p "$preserved"
+  printf 'owned bytes\n' > "$preserved/user-file"
+  installer_write_manifest "$manifest" "file://$INSTALLER_ROOT" \
+    'releases/stable/linux/flutter_linux_3.38.1-stable.tar.xz' "$good_sha" \
+    3.38.1 stable x64
+  installer_expect 'nonempty existing destination was replaced' 1 \
+    --version 3.38.1 --channel stable --architecture x64 \
+    --destination "$preserved" --manifest-url "file://$manifest"
+  grep -F 'owned bytes' "$preserved/user-file" >/dev/null 2>&1 ||
+    fail 'existing destination was not preserved'
+
+  slow_archive=$INSTALLER_ROOT/releases/stable/linux/slow.tar.xz
+  installer_make_archive "$slow_archive" slow
+  slow_sha=$(installer_sha256 "$slow_archive")
+  installer_write_manifest "$manifest" "file://$INSTALLER_ROOT" \
+    'releases/stable/linux/slow.tar.xz' "$slow_sha" 3.38.1 stable x64
+  signal_marker=$INSTALLER_ROOT/flutter-started
+  FPRS_TEST_MODE=1 FPRS_TEST_FLUTTER_MARKER=$signal_marker "$INSTALLER" \
+    --version 3.38.1 --channel stable --architecture x64 \
+    --destination "$INSTALLER_ROOT/signal-sdk" --manifest-url "file://$manifest" \
+    >"$INSTALLER_ROOT/signal.stdout" 2>"$INSTALLER_ROOT/signal.stderr" &
+  installer_pid=$!
+  installer_wait=0
+  while [ ! -e "$signal_marker" ] && [ "$installer_wait" -lt 100 ]; do
+    sleep 0.05
+    installer_wait=$((installer_wait + 1))
+  done
+  [ -e "$signal_marker" ] || fail 'signal test did not reach extracted version verification'
+  kill -TERM "$installer_pid"
+  set +e
+  wait "$installer_pid"
+  installer_signal_status=$?
+  set -e
+  [ "$installer_signal_status" -ne 0 ] || fail 'installer ignored TERM'
+  [ ! -e "$INSTALLER_ROOT/signal-sdk" ] || fail 'signal left a destination behind'
+  if find "$INSTALLER_ROOT" -maxdepth 1 -name '.flutter-sdk-install.*' -print | grep . >/dev/null 2>&1; then
+    fail 'installer left private staging files after a signal'
+  fi
+  pass 'flutter_sdk_installer'
+}
+
+workflow_template() {
+  workflow=$PACKAGE_ROOT/templates/release-android.yml
+  for required_text in \
+    'types: [published]' \
+    'workflow_dispatch:' \
+    'permissions:' \
+    'contents: read' \
+    'group: play-store-release' \
+    'cancel-in-progress: false' \
+    'queue: max' \
+    'timeout-minutes:' \
+    'ref: ${{ github.sha }}' \
+    'fetch-depth: 0' \
+    'persist-credentials: false' \
+    'git check-ref-format' \
+    'refs/tags/${release_tag}^{commit}' \
+    'play-store-production' \
+    'play-store-nonproduction' \
+    'ANDROID_KEY_PROPERTIES_PATH' \
+    'SLACK_NOTIFICATION_OWNER: github-actions' \
+    'RELEASE_RESULT_PATH: ${{ runner.temp }}/release-result.json' \
+    'bundle exec fastlane android release' \
+    'if: ${{ always() }}'
+  do
+    grep -F -- "$required_text" "$workflow" >/dev/null 2>&1 ||
+      fail "workflow is missing: $required_text"
+  done
+  for input_name in version_name flutter_version track release_status run_tests \
+    distribution_target firebase_artifact_type firebase_release_notes \
+    confirm_firebase_package_match confirm_firebase_aab_play_linked confirm_production
+  do
+    grep -E "^[[:space:]]{6}$input_name:" "$workflow" >/dev/null 2>&1 ||
+      fail "workflow input is missing: $input_name"
+  done
+  ! grep -E '^[[:space:]]{6}ref:' "$workflow" >/dev/null 2>&1 ||
+    fail 'workflow exposes a custom mutable ref input'
+  grep -F -- '--architecture x64' "$workflow" >/dev/null 2>&1 ||
+    fail 'workflow does not install the x64 Flutter archive explicitly'
+  ! grep -E 'uses:[[:space:]]+[^#]*(flutter-action|fastlane-action)' "$workflow" >/dev/null 2>&1 ||
+    fail 'workflow uses a third-party Flutter or Fastlane wrapper action'
+  python3 - "$workflow" <<'PY'
+import re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+refs = re.findall(r"^\s*uses:\s*([^\s#]+)", text, re.M)
+bad = [ref for ref in refs if not (ref.startswith("./") or re.fullmatch(r"[^@]+@[0-9a-f]{40}", ref))]
+if bad:
+    raise SystemExit("mutable action refs: " + repr(bad))
+for action in ("actions/checkout", "actions/setup-java", "ruby/setup-ruby"):
+    if len([ref for ref in refs if ref.startswith(action + "@")]) != 1:
+        raise SystemExit("missing or duplicate baseline action: " + action)
+run_blocks = re.findall(r"^\s*run:\s*\|[^\n]*\n((?:\s{8,}.*\n?)*)", text, re.M)
+for block in run_blocks:
+    if re.search(r"\$\{\{\s*(?:inputs\.|github\.event\.|github\.ref|github\.sha)", block):
+        raise SystemExit("untrusted GitHub expression interpolated in run block")
+if re.search(r"^\s*if:\s*\$\{\{\s*secrets\.", text, re.M):
+    raise SystemExit("secret used directly in if expression")
+for canary in ("version_name", "track", "release_status", "distribution_target", "firebase_release_notes"):
+    if not re.search(r"^\s+" + canary.upper() + r":\s*\$\{\{\s*inputs\." + canary, text, re.M):
+        raise SystemExit("missing step-local untrusted input mapping: " + canary)
+PY
+  ruby -e 'require "yaml"; YAML.parse_file(ARGV.fetch(0))' "$workflow" >/dev/null ||
+    fail 'workflow is not valid YAML'
+  [ "$(grep -c 'SLACK_WEBHOOK_URL:.*secrets.SLACK_WEBHOOK_URL' "$workflow")" -eq 1 ] ||
+    fail 'Slack webhook does not have exactly one workflow owner'
+  [ "$(grep -c 'ANDROID_KEYSTORE_BASE64:.*secrets.ANDROID_KEYSTORE_BASE64' "$workflow")" -eq 1 ] ||
+    fail 'keystore Base64 secret is not scoped to exactly one decode step'
+  [ "$(grep -c 'GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64:.*secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64' "$workflow")" -eq 1 ] ||
+    fail 'Play JSON secret is not scoped to exactly one decode step'
+  [ "$(grep -c 'FIREBASE_SERVICE_ACCOUNT_JSON_BASE64:.*secrets.FIREBASE_SERVICE_ACCOUNT_JSON_BASE64' "$workflow")" -eq 1 ] ||
+    fail 'Firebase JSON secret is not scoped to exactly one decode step'
+  grep -F '[ -e android/key.properties ]' "$workflow" >/dev/null 2>&1 ||
+    fail 'workflow does not preserve a pre-existing project key.properties'
+  grep -F 'java_properties_escape' "$workflow" >/dev/null 2>&1 ||
+    fail 'workflow does not escape Java properties values'
+  ! grep -E '(GITHUB_OUTPUT|GITHUB_STEP_SUMMARY).*(BASE64|PASSWORD|WEBHOOK|KEY_ALIAS)' "$workflow" >/dev/null 2>&1 ||
+    fail 'workflow writes secret material to an output or summary'
+  pass 'workflow_template'
+}
+
 run_test_group() {
   case "$1" in
     package_contract) package_contract ;;
@@ -4705,6 +5030,8 @@ run_test_group() {
     gradle_signing) gradle_signing ;;
     bootstrap_core) bootstrap_core ;;
     fastlane_templates) fastlane_templates ;;
+    flutter_sdk_installer) flutter_sdk_installer ;;
+    workflow_template) workflow_template ;;
     *) fail "unknown test group: $1" ;;
   esac
 }
@@ -4718,6 +5045,8 @@ if [ "$#" -eq 0 ] || [ "${1-}" = all ]; then
   gradle_signing
   bootstrap_core
   fastlane_templates
+  flutter_sdk_installer
+  workflow_template
 else
   for requested_group in "$@"
   do

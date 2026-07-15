@@ -6198,6 +6198,139 @@ GRADLE
   pass 'release_validator'
 }
 
+documentation() {
+  documentation_files='SKILL.md
+README.md
+templates/PLAY_STORE_RELEASE.md
+references/environment-variables.md
+references/execution-defaults.md
+references/first-release-checklist.md
+references/troubleshooting.md'
+
+  for relative_path in $documentation_files
+  do
+    assert_file "$relative_path"
+    if LC_ALL=C grep '[^ -~	]' "$PACKAGE_ROOT/$relative_path" >/dev/null 2>&1; then
+      fail "runtime documentation must use English ASCII prose: $relative_path"
+    fi
+    if grep -E '/Users/|file://|[A-Za-z]:\\\\Users\\\\' "$PACKAGE_ROOT/$relative_path" >/dev/null 2>&1; then
+      fail "runtime documentation contains a machine-specific path: $relative_path"
+    fi
+  done
+
+  skill_lines=$(wc -l < "$PACKAGE_ROOT/SKILL.md" | tr -d ' ')
+  [ "$skill_lines" -lt 500 ] || fail 'SKILL.md must remain under 500 lines'
+  [ "$(sed -n '1p' "$PACKAGE_ROOT/SKILL.md")" = '---' ] ||
+    fail 'SKILL.md must start with YAML frontmatter'
+  [ "$(sed -n '2p' "$PACKAGE_ROOT/SKILL.md")" = 'name: flutter-play-store-release' ] ||
+    fail 'SKILL.md must declare only the canonical name first'
+  case "$(sed -n '3p' "$PACKAGE_ROOT/SKILL.md")" in
+    'description: '[A-Za-z]*) ;;
+    *) fail 'SKILL.md must declare an English description second' ;;
+  esac
+  [ "$(sed -n '4p' "$PACKAGE_ROOT/SKILL.md")" = '---' ] ||
+    fail 'SKILL.md frontmatter may contain only name and description'
+  [ "$(sed -n '5p' "$PACKAGE_ROOT/SKILL.md")" != '---' ] ||
+    fail 'SKILL.md contains an extra frontmatter field'
+
+  for heading in \
+    '## Quick start' '## Triggers' '## Classification' '## Inspect' \
+    '## Authorization gate' '## Execute' '## Validate' '## Completion report' \
+    '## Definition of done'
+  do
+    assert_contains 'SKILL.md' "$heading"
+  done
+  for mode in setup doctor build deploy ci firebase-distribution slack repair
+  do
+    assert_contains 'SKILL.md' "\`$mode\`"
+  done
+  for use_case in \
+    'Set up Android release automation.' \
+    'Check whether this Flutter app is ready for Google Play.' \
+    'Build an Android App Bundle without uploading it.' \
+    'Deploy this build to the named Google Play track.' \
+    'Configure the Android release workflow in GitHub Actions.' \
+    'Distribute this Android build with Firebase App Distribution.' \
+    'Add Slack release notifications.' \
+    'Repair the existing Android release setup.'
+  do
+    assert_contains 'SKILL.md' "$use_case"
+  done
+  assert_contains 'SKILL.md' '/flutter-play-store-release'
+  assert_contains 'SKILL.md' '$flutter-play-store-release'
+  assert_contains 'SKILL.md' 'Android only'
+  assert_contains 'SKILL.md' 'Inspect before editing.'
+  assert_contains 'SKILL.md' 'Do not upload'
+  assert_contains 'SKILL.md' 'references/execution-defaults.md'
+  if grep -E 'references/[^)[:space:]]*/[^)[:space:]]+' "$PACKAGE_ROOT/SKILL.md" >/dev/null 2>&1; then
+    fail 'SKILL.md reference links must remain one level deep'
+  fi
+
+  for section in \
+    '## Purpose' '## Compatibility' '## Install, update, and uninstall' \
+    '## Direct scripts' '## Example prompts' '## Modes' '## Safety' \
+    '## Generated files' '## Validation' '## Limitations' '## Sources'
+  do
+    assert_contains 'README.md' "$section"
+  done
+
+  for topic in \
+    '## 1. Purpose' '## 2. Generated files' '## 3. Play Console setup' \
+    '## 4. Service account setup' '## 5. Upload key setup' \
+    '## 6. GitHub secrets' '## 7. First manual upload' \
+    '## 8. Local doctor' '## 9. Local build' '## 10. Internal deployment' \
+    '## 11. GitHub Release runs' '## 12. Manual workflow runs' \
+    '## 13. Slack notifications' '## 14. Firebase App Distribution' \
+    '## 15. Troubleshooting' '## 16. Key loss and rotation' \
+    '## 17. Rollback and promotion'
+  do
+    assert_contains 'templates/PLAY_STORE_RELEASE.md' "$topic"
+  done
+
+  documentation_corpus="$TMP_ROOT/documentation-corpus"
+  : > "$documentation_corpus"
+  for relative_path in $documentation_files
+  do
+    sed -n '1,$p' "$PACKAGE_ROOT/$relative_path" >> "$documentation_corpus"
+  done
+  for required_text in \
+    'flutter_version -> project pin -> FLUTTER_VERSION -> fail' \
+    'play-store-production' 'play-store-nonproduction' \
+    'ANDROID_KEY_PROPERTIES_PATH' 'FIREBASE_ANDROID_ARTIFACT_TYPE' \
+    'APP_PACKAGE_NAME' 'ANDROID_KEYSTORE_BASE64' 'ANDROID_KEYSTORE_PASSWORD' \
+    'ANDROID_KEY_ALIAS' 'ANDROID_KEY_PASSWORD' \
+    'GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64' \
+    'FIREBASE_SERVICE_ACCOUNT_JSON_BASE64' 'SLACK_WEBHOOK_URL' \
+    'FIREBASE_APP_ID' 'FIREBASE_TESTER_GROUPS' 'FIREBASE_TESTERS' \
+    'gh secret set SECRET_NAME' 'RELEASE_RESULT_PATH' \
+    'macOS' 'Linux' 'PowerShell' 'no-wrap Base64' \
+    'Encoding is not encryption.' 'Play App Signing' 'upload key backup' \
+    'least privilege' 'first manual AAB' 'new personal developer accounts' \
+    'closed testing' 'version-sensitive' 'rollback' 'promotion' \
+    'test-app signing certificate' 'Slack failure must not mask' \
+    'path > Base64 > default' 'type | context | default | precedence | secrecy | validation | owner' \
+    'authentication' 'permissions' 'draft or new app' 'reused version code' \
+    'stale artifacts' 'Firebase Play link' 'CI runner and actions'
+  do
+    grep -F -- "$required_text" "$documentation_corpus" >/dev/null 2>&1 ||
+      fail "documentation corpus does not contain: $required_text"
+  done
+
+  for source_url in \
+    'https://docs.flutter.dev/deployment/android' \
+    'https://developer.android.com/studio/publish/app-signing' \
+    'https://developers.google.com/android-publisher' \
+    'https://docs.fastlane.tools/actions/upload_to_play_store/' \
+    'https://docs.github.com/actions' \
+    'https://firebase.google.com/docs/app-distribution/android/distribute-fastlane'
+  do
+    grep -F -- "$source_url" "$documentation_corpus" >/dev/null 2>&1 ||
+      fail "documentation corpus is missing primary source: $source_url"
+  done
+
+  pass 'documentation'
+}
+
 run_test_group() {
   case "$1" in
     package_contract) package_contract ;;
@@ -6211,6 +6344,7 @@ run_test_group() {
     flutter_sdk_installer) flutter_sdk_installer ;;
     workflow_template) workflow_template ;;
     release_validator) release_validator ;;
+    documentation) documentation ;;
     *) fail "unknown test group: $1" ;;
   esac
 }
@@ -6228,6 +6362,7 @@ if [ "$#" -eq 0 ] || [ "${1-}" = all ]; then
   flutter_sdk_installer
   workflow_template
   release_validator
+  documentation
 else
   for requested_group in "$@"
   do

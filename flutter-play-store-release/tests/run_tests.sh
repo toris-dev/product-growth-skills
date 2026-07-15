@@ -4518,8 +4518,11 @@ bootstrap_core_run() {
   else
     bootstrap_actual_status=$?
   fi
-  [ "$bootstrap_actual_status" -eq "$bootstrap_expected_status" ] ||
+  if [ "$bootstrap_actual_status" -ne "$bootstrap_expected_status" ]; then
+    sed -n '1,120p' "$BOOTSTRAP_LAST_STDOUT" >&2
+    sed -n '1,120p' "$BOOTSTRAP_LAST_STDERR" >&2
     fail "$bootstrap_description (expected exit $bootstrap_expected_status, got $bootstrap_actual_status)"
+  fi
 }
 
 bootstrap_core() {
@@ -4578,18 +4581,11 @@ bootstrap_core() {
   mkdir -p "$bootstrap_skip_apply_project/.github/workflows"
   printf 'name: preserved user workflow\n' > \
     "$bootstrap_skip_apply_project/.github/workflows/release-android.yml"
-  cp "$bootstrap_skip_apply_project/.github/workflows/release-android.yml" \
-    "$BOOTSTRAP_ROOT/skip-workflow.expected"
+  cp -R "$bootstrap_skip_apply_project" "$BOOTSTRAP_ROOT/skip apply baseline"
   bootstrap_core_run 'non-dry skip did not report incomplete setup' 1 \
     "$BOOTSTRAP" --project "$bootstrap_skip_apply_project" --conflict skip
-  assert_same_file "$BOOTSTRAP_ROOT/skip-workflow.expected" \
-    "$bootstrap_skip_apply_project/.github/workflows/release-android.yml" \
-    'non-dry skip changed the conflicting workflow'
-  grep -F 'BEGIN flutter-play-store-release schema=1' \
-    "$bootstrap_skip_apply_project/android/app/build.gradle.kts" >/dev/null 2>&1 ||
-    fail 'non-dry skip did not apply the safe Gradle candidate'
-  [ -f "$bootstrap_skip_apply_project/android/Gemfile" ] ||
-    fail 'non-dry skip did not create a safe planned target'
+  diff -r "$BOOTSTRAP_ROOT/skip apply baseline" "$bootstrap_skip_apply_project" \
+    >/dev/null 2>&1 || fail 'non-dry skip made partial project changes'
 
   bootstrap_core_run 'missing bootstrap arguments were accepted' 2 "$BOOTSTRAP"
   bootstrap_core_run 'invalid conflict mode was accepted' 2 \
@@ -4622,7 +4618,7 @@ bootstrap_core() {
   bootstrap_merge_project="$BOOTSTRAP_ROOT/merge ownership project"
   inspection_make_minimal_kotlin "$bootstrap_merge_project"
   mkdir -p "$bootstrap_merge_project/android/fastlane"
-  printf 'source "https://example.invalid"\n' > "$bootstrap_merge_project/android/Gemfile"
+  printf 'source "https://rubygems.org"\n' > "$bootstrap_merge_project/android/Gemfile"
   printf 'platform :android do\nend\n' > "$bootstrap_merge_project/android/fastlane/Fastfile"
   printf '# user plugin declarations\n' > "$bootstrap_merge_project/android/fastlane/Pluginfile"
   bootstrap_core_run 'first merge bootstrap failed' 0 \
@@ -4667,6 +4663,337 @@ bootstrap_core() {
       fail "bootstrap write failure $bootstrap_fail_after changed project bytes"
   done
   pass 'bootstrap_core'
+}
+
+bootstrap_full_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{ print $1 }'
+  else
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  fi
+}
+
+bootstrap_full_assert_snapshot() {
+  expected_tree=$1
+  actual_tree=$2
+  description=$3
+  diff -r "$expected_tree" "$actual_tree" >/dev/null 2>&1 ||
+    fail "$description"
+}
+
+bootstrap_full_assert_sidecar() {
+  project=$1
+  sidecar="$project/tool/flutter-play-store-release/managed-files.sha256"
+  [ -f "$sidecar" ] || fail 'bootstrap omitted the managed-file sidecar'
+  [ "$(sed -n '1p' "$sidecar")" = 'package_id=flutter-play-store-release' ] ||
+    fail 'managed-file sidecar omitted the package identity'
+  [ "$(sed -n '2p' "$sidecar")" = 'schema_version=1' ] ||
+    fail 'managed-file sidecar omitted the schema version'
+  sed -n '3,$p' "$sidecar" > "$BOOTSTRAP_FULL_ROOT/sidecar.records"
+  [ -s "$BOOTSTRAP_FULL_ROOT/sidecar.records" ] ||
+    fail 'managed-file sidecar omitted body hashes'
+  : > "$BOOTSTRAP_FULL_ROOT/sidecar.paths"
+  while IFS=' ' read -r managed_hash managed_path managed_extra
+  do
+    [ -n "$managed_hash" ] && [ -n "$managed_path" ] && [ -z "$managed_extra" ] ||
+      fail 'managed-file sidecar contains a malformed record'
+    case "$managed_hash" in
+      *[!0-9a-f]*|'') fail 'managed-file sidecar contains a non-SHA-256 hash' ;;
+    esac
+    [ "${#managed_hash}" -eq 64 ] ||
+      fail 'managed-file sidecar contains a non-SHA-256 hash'
+    [ "$managed_path" != 'tool/flutter-play-store-release/managed-files.sha256' ] ||
+      fail 'managed-file sidecar hashes itself'
+    [ -f "$project/$managed_path" ] && [ ! -L "$project/$managed_path" ] ||
+      fail "managed-file sidecar names an invalid file: $managed_path"
+    [ "$(bootstrap_full_sha256 "$project/$managed_path")" = "$managed_hash" ] ||
+      fail "managed-file sidecar hash does not match: $managed_path"
+    printf '%s\n' "$managed_path" >> "$BOOTSTRAP_FULL_ROOT/sidecar.paths"
+  done < "$BOOTSTRAP_FULL_ROOT/sidecar.records"
+  LC_ALL=C sort -u "$BOOTSTRAP_FULL_ROOT/sidecar.paths" > \
+    "$BOOTSTRAP_FULL_ROOT/sidecar.paths.sorted"
+  assert_same_file "$BOOTSTRAP_FULL_ROOT/sidecar.paths.sorted" \
+    "$BOOTSTRAP_FULL_ROOT/sidecar.paths" \
+    'managed-file sidecar paths are not sorted and unique'
+}
+
+bootstrap_full_conflict() {
+  description=$1
+  project=$2
+  baseline=$3
+  bootstrap_full_run "$description" 2 "$BOOTSTRAP" --project "$project"
+  bootstrap_full_assert_snapshot "$baseline" "$project" \
+    "$description changed the project before reporting the conflict"
+}
+
+bootstrap_full_run() {
+  bootstrap_description=$1
+  bootstrap_expected_status=$2
+  shift 2
+  bootstrap_case_index=$((bootstrap_case_index + 1))
+  BOOTSTRAP_LAST_STDOUT="$BOOTSTRAP_FULL_LOGS/$bootstrap_case_index.stdout"
+  BOOTSTRAP_LAST_STDERR="$BOOTSTRAP_FULL_LOGS/$bootstrap_case_index.stderr"
+  if "$@" > "$BOOTSTRAP_LAST_STDOUT" 2> "$BOOTSTRAP_LAST_STDERR"; then
+    bootstrap_actual_status=0
+  else
+    bootstrap_actual_status=$?
+  fi
+  if [ "$bootstrap_actual_status" -ne "$bootstrap_expected_status" ]; then
+    sed -n '1,120p' "$BOOTSTRAP_LAST_STDOUT" >&2
+    sed -n '1,120p' "$BOOTSTRAP_LAST_STDERR" >&2
+    fail "$bootstrap_description (expected exit $bootstrap_expected_status, got $bootstrap_actual_status)"
+  fi
+}
+
+bootstrap_full() {
+  BOOTSTRAP="$PACKAGE_ROOT/scripts/bootstrap_android_fastlane.sh"
+  BOOTSTRAP_FULL_ROOT="$TMP_ROOT/bootstrap full"
+  BOOTSTRAP_FULL_LOGS="$BOOTSTRAP_FULL_ROOT/logs"
+  bootstrap_case_index=0
+  mkdir -p "$BOOTSTRAP_FULL_LOGS"
+
+  full_project="$BOOTSTRAP_FULL_ROOT/fresh project"
+  inspection_make_minimal_kotlin "$full_project"
+  bootstrap_full_run 'full bootstrap failed for an absent target set' 0 \
+    "$BOOTSTRAP" --project "$full_project"
+  cat > "$BOOTSTRAP_FULL_ROOT/generated.paths" <<'PATHS'
+.github/workflows/release-android.yml
+.gitignore
+android/Gemfile
+android/Gemfile.lock
+android/app/build.gradle.kts
+android/fastlane/.env.example
+android/fastlane/Appfile
+android/fastlane/Fastfile
+android/fastlane/Pluginfile
+android/fastlane/lib/flutter_play_store_release.rb
+android/key.properties.example
+docs/PLAY_STORE_RELEASE.md
+tool/flutter-play-store-release/decode_secret.sh
+tool/flutter-play-store-release/install_flutter_sdk.sh
+tool/flutter-play-store-release/managed-files.sha256
+PATHS
+  while IFS= read -r generated_path
+  do
+    [ -f "$full_project/$generated_path" ] ||
+      fail "full bootstrap omitted generated path: $generated_path"
+  done < "$BOOTSTRAP_FULL_ROOT/generated.paths"
+  bootstrap_full_assert_sidecar "$full_project"
+  grep -F 'android/Gemfile.lock' "$BOOTSTRAP_FULL_ROOT/sidecar.paths" >/dev/null 2>&1 ||
+    fail 'managed-file sidecar omitted Gemfile.lock'
+  grep -F 'APP_PACKAGE_NAME=com.example.kotlin' \
+    "$full_project/android/fastlane/.env.example" >/dev/null 2>&1 ||
+    fail 'bootstrap did not substitute the inspected application ID'
+  for generated_helper in decode_secret.sh install_flutter_sdk.sh
+  do
+    assert_same_file "$PACKAGE_ROOT/scripts/$generated_helper" \
+      "$full_project/tool/flutter-play-store-release/$generated_helper" \
+      "bootstrap did not copy CI helper $generated_helper byte-for-byte"
+  done
+  for ignore_line in \
+    'android/fastlane/.env' 'android/key.properties' 'android/*.jks' \
+    'android/*.keystore' 'google-play-service-account.json' \
+    '**/google-play-service-account.json' 'fastlane/report.xml' \
+    'fastlane/Preview.html' 'fastlane/screenshots/' 'fastlane/test_output/'
+  do
+    [ "$(grep -F -x -c -- "$ignore_line" "$full_project/.gitignore")" -eq 1 ] ||
+      fail "bootstrap did not merge one exact ignore rule: $ignore_line"
+  done
+  if git -C "$full_project" check-ignore --no-index -q \
+    android/fastlane/.env.example android/key.properties.example 2>/dev/null; then
+    fail 'bootstrap ignore rules made example files uncommittable'
+  fi
+  if rg -n 'CHANGE_ME_APPLICATION_ID' "$full_project" \
+    -g '!android/fastlane/.env.example' -g '!docs/PLAY_STORE_RELEASE.md' \
+    >/dev/null 2>&1; then
+    fail 'resolved bootstrap left an active application-ID placeholder'
+  fi
+  cp -R "$full_project" "$BOOTSTRAP_FULL_ROOT/fresh baseline"
+  bootstrap_full_run 'second full bootstrap was not idempotent' 0 \
+    "$BOOTSTRAP" --project "$full_project"
+  bootstrap_full_assert_snapshot "$BOOTSTRAP_FULL_ROOT/fresh baseline" \
+    "$full_project" 'second full bootstrap changed the project'
+
+  dry_project="$BOOTSTRAP_FULL_ROOT/deterministic dry run"
+  inspection_make_minimal_kotlin "$dry_project"
+  bootstrap_full_run 'first deterministic dry run failed' 0 \
+    "$BOOTSTRAP" --project "$dry_project" --dry-run
+  cp "$BOOTSTRAP_LAST_STDOUT" "$BOOTSTRAP_FULL_ROOT/dry.stdout"
+  cp "$BOOTSTRAP_LAST_STDERR" "$BOOTSTRAP_FULL_ROOT/dry.stderr"
+  bootstrap_full_run 'second deterministic dry run failed' 0 \
+    "$BOOTSTRAP" --project "$dry_project" --dry-run
+  assert_same_file "$BOOTSTRAP_FULL_ROOT/dry.stdout" "$BOOTSTRAP_LAST_STDOUT" \
+    'bootstrap dry-run stdout was not deterministic'
+  assert_same_file "$BOOTSTRAP_FULL_ROOT/dry.stderr" "$BOOTSTRAP_LAST_STDERR" \
+    'bootstrap dry-run stderr was not deterministic'
+
+  owned_package="$BOOTSTRAP_FULL_ROOT/package copy"
+  cp -R "$PACKAGE_ROOT" "$owned_package"
+  owned_project="$BOOTSTRAP_FULL_ROOT/owned update project"
+  inspection_make_minimal_kotlin "$owned_project"
+  bootstrap_full_run 'initial owned-file bootstrap failed' 0 \
+    "$owned_package/scripts/bootstrap_android_fastlane.sh" --project "$owned_project"
+  printf '# canonical update\n' >> "$owned_package/templates/Appfile"
+  bootstrap_full_run 'verified owned file was not safely updated' 0 \
+    "$owned_package/scripts/bootstrap_android_fastlane.sh" --project "$owned_project"
+  grep -F '# canonical update' "$owned_project/android/fastlane/Appfile" >/dev/null 2>&1 ||
+    fail 'verified owned Appfile was not updated from the canonical template'
+  grep -F 'PLAN update-owned android/fastlane/Appfile' \
+    "$BOOTSTRAP_LAST_STDOUT" >/dev/null 2>&1 ||
+    fail 'verified owned Appfile was not classified as update-owned'
+
+  edited_project="$BOOTSTRAP_FULL_ROOT/edited owned project"
+  inspection_make_minimal_kotlin "$edited_project"
+  bootstrap_full_run 'initial edited-owned fixture bootstrap failed' 0 \
+    "$BOOTSTRAP" --project "$edited_project"
+  printf '# user edit\n' >> "$edited_project/android/fastlane/Appfile"
+  cp -R "$edited_project" "$BOOTSTRAP_FULL_ROOT/edited owned baseline"
+  bootstrap_full_conflict 'edited owned file was overwritten' "$edited_project" \
+    "$BOOTSTRAP_FULL_ROOT/edited owned baseline"
+
+  merge_project="$BOOTSTRAP_FULL_ROOT/safe merge project"
+  inspection_make_minimal_kotlin "$merge_project"
+  mkdir -p "$merge_project/android/fastlane"
+  printf 'source "https://rubygems.org"\n' > "$merge_project/android/Gemfile"
+  printf 'platform :ios do\n  lane :custom do\n  end\nend\n' > \
+    "$merge_project/android/fastlane/Fastfile"
+  printf '# existing compatible plugin file\n' > \
+    "$merge_project/android/fastlane/Pluginfile"
+  bootstrap_full_run 'safe Gemfile/Fastfile/Pluginfile merge failed' 0 \
+    "$BOOTSTRAP" --project "$merge_project"
+  ruby -c "$merge_project/android/Gemfile" >/dev/null 2>&1 ||
+    fail 'merged Gemfile is not valid Ruby'
+  ruby -c "$merge_project/android/fastlane/Fastfile" >/dev/null 2>&1 ||
+    fail 'merged Fastfile is not valid Ruby'
+  grep -F 'gem "fastlane", "= 2.237.0"' "$merge_project/android/Gemfile" >/dev/null 2>&1 ||
+    fail 'safe Gemfile merge omitted the exact Fastlane pin'
+  [ "$(grep -c 'eval_gemfile' "$merge_project/android/Gemfile")" -eq 1 ] ||
+    fail 'safe Gemfile merge did not produce exactly one Pluginfile import'
+  grep -F 'gem "fastlane-plugin-firebase_app_distribution", "= 1.0.0"' \
+    "$merge_project/android/fastlane/Pluginfile" >/dev/null 2>&1 ||
+    fail 'safe Pluginfile merge omitted the exact plugin pin'
+  for required_lane in doctor prepare build release release_play_store firebase_distribution
+  do
+    [ "$(grep -E -c "lane[[:space:]]+:$required_lane([^A-Za-z0-9_]|$)" \
+      "$merge_project/android/fastlane/Fastfile")" -eq 1 ] ||
+      fail "safe Fastfile merge omitted or duplicated lane: $required_lane"
+  done
+
+  lane_project="$BOOTSTRAP_FULL_ROOT/lane conflict"
+  inspection_make_minimal_kotlin "$lane_project"
+  mkdir -p "$lane_project/android/fastlane"
+  printf 'lane :doctor do\nend\n' > "$lane_project/android/fastlane/Fastfile"
+  cp -R "$lane_project" "$BOOTSTRAP_FULL_ROOT/lane conflict baseline"
+  bootstrap_full_conflict 'required Fastlane lane conflict was accepted' \
+    "$lane_project" "$BOOTSTRAP_FULL_ROOT/lane conflict baseline"
+
+  plugin_project="$BOOTSTRAP_FULL_ROOT/plugin conflict"
+  inspection_make_minimal_kotlin "$plugin_project"
+  mkdir -p "$plugin_project/android/fastlane"
+  printf 'gem "fastlane-plugin-firebase_app_distribution", "= 0.9.0"\n' > \
+    "$plugin_project/android/fastlane/Pluginfile"
+  cp -R "$plugin_project" "$BOOTSTRAP_FULL_ROOT/plugin conflict baseline"
+  bootstrap_full_conflict 'incompatible plugin declaration was accepted' \
+    "$plugin_project" "$BOOTSTRAP_FULL_ROOT/plugin conflict baseline"
+
+  gem_project="$BOOTSTRAP_FULL_ROOT/gem conflict"
+  inspection_make_minimal_kotlin "$gem_project"
+  printf 'source "https://rubygems.org"\ngem "fastlane", ">= 2.0"\n' > \
+    "$gem_project/android/Gemfile"
+  cp -R "$gem_project" "$BOOTSTRAP_FULL_ROOT/gem conflict baseline"
+  bootstrap_full_conflict 'conflicting Fastlane constraint was accepted' \
+    "$gem_project" "$BOOTSTRAP_FULL_ROOT/gem conflict baseline"
+
+  eval_project="$BOOTSTRAP_FULL_ROOT/eval conflict"
+  inspection_make_minimal_kotlin "$eval_project"
+  printf 'source "https://rubygems.org"\neval_gemfile(ENV.fetch("PLUGINFILE"))\n' > \
+    "$eval_project/android/Gemfile"
+  cp -R "$eval_project" "$BOOTSTRAP_FULL_ROOT/eval conflict baseline"
+  bootstrap_full_conflict 'dynamic eval_gemfile import was accepted' \
+    "$eval_project" "$BOOTSTRAP_FULL_ROOT/eval conflict baseline"
+
+  workflow_project="$BOOTSTRAP_FULL_ROOT/workflow conflict"
+  inspection_make_minimal_kotlin "$workflow_project"
+  mkdir -p "$workflow_project/.github/workflows"
+  printf 'name: user release\n' > "$workflow_project/.github/workflows/release-android.yml"
+  cp -R "$workflow_project" "$BOOTSTRAP_FULL_ROOT/workflow conflict baseline"
+  bootstrap_full_conflict 'unowned workflow was overwritten' "$workflow_project" \
+    "$BOOTSTRAP_FULL_ROOT/workflow conflict baseline"
+
+  unresolved_project="$BOOTSTRAP_FULL_ROOT/unresolved application ID"
+  inspection_make_unresolved "$unresolved_project"
+  bootstrap_full_run 'unresolved application ID did not return incomplete status' 1 \
+    "$BOOTSTRAP" --project "$unresolved_project"
+  grep -F 'CHANGE_ME_APPLICATION_ID' \
+    "$unresolved_project/android/fastlane/.env.example" >/dev/null 2>&1 ||
+    fail 'unresolved bootstrap omitted the example application-ID placeholder'
+  grep -F 'application ID is unresolved' "$BOOTSTRAP_LAST_STDERR" >/dev/null 2>&1 ||
+    fail 'unresolved bootstrap omitted an actionable incomplete diagnostic'
+  for active_path in android/fastlane/Appfile android/fastlane/Fastfile \
+    .github/workflows/release-android.yml android/app/build.gradle
+  do
+    if grep -F 'CHANGE_ME_APPLICATION_ID' "$unresolved_project/$active_path" >/dev/null 2>&1; then
+      fail "unresolved bootstrap put a placeholder in active configuration: $active_path"
+    fi
+  done
+
+  flavor_project="$BOOTSTRAP_FULL_ROOT/flavor substitution"
+  inspection_make_minimal_kotlin "$flavor_project"
+  cat > "$flavor_project/android/app/build.gradle.kts" <<'KOTLIN'
+android {
+    namespace = "com.acme.mobile"
+    flavorDimensions += "environment"
+    defaultConfig {
+        applicationId = "com.acme.mobile"
+        versionCode = 1
+        versionName = "1.0.0"
+    }
+    productFlavors {
+        create("release") {
+            applicationId = "com.acme.mobile.release"
+        }
+    }
+}
+KOTLIN
+  bootstrap_full_run 'validated release flavor bootstrap failed' 0 \
+    "$BOOTSTRAP" --project "$flavor_project" --flavor release
+  grep -F 'APP_PACKAGE_NAME=com.acme.mobile.release' \
+    "$flavor_project/android/fastlane/.env.example" >/dev/null 2>&1 ||
+    fail 'bootstrap did not substitute the flavor application ID'
+  grep -F 'FLUTTER_FLAVOR=release' \
+    "$flavor_project/android/fastlane/.env.example" >/dev/null 2>&1 ||
+    fail 'bootstrap did not substitute the validated flavor'
+
+  crlf_project="$BOOTSTRAP_FULL_ROOT/crlf gitignore"
+  inspection_make_minimal_kotlin "$crlf_project"
+  printf 'build/\r\n' > "$crlf_project/.gitignore"
+  bootstrap_full_run 'CRLF .gitignore bootstrap failed' 0 \
+    "$BOOTSTRAP" --project "$crlf_project"
+  python3 - "$crlf_project/.gitignore" <<'PY' ||
+import sys
+
+data = open(sys.argv[1], "rb").read()
+raise SystemExit(0 if b"\n" not in data.replace(b"\r\n", b"") else 1)
+PY
+    fail 'bootstrap changed the existing .gitignore line-ending convention'
+
+  for bootstrap_fail_after in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+  do
+    full_failure_project="$BOOTSTRAP_FULL_ROOT/rollback $bootstrap_fail_after"
+    full_failure_baseline="$BOOTSTRAP_FULL_ROOT/rollback baseline $bootstrap_fail_after"
+    inspection_make_minimal_kotlin "$full_failure_project"
+    cp -R "$full_failure_project" "$full_failure_baseline"
+    bootstrap_full_run "full bootstrap write failure $bootstrap_fail_after did not roll back" 3 \
+      env FPRS_TEST_MODE=1 \
+      FPRS_TEST_FAIL_PROJECT_WRITE_AFTER="$bootstrap_fail_after" \
+      "$BOOTSTRAP" --project "$full_failure_project"
+    grep -F 'rollback attempted' "$BOOTSTRAP_LAST_STDERR" >/dev/null 2>&1 ||
+      fail "full bootstrap write failure $bootstrap_fail_after omitted rollback status"
+    bootstrap_full_assert_snapshot "$full_failure_baseline" "$full_failure_project" \
+      "full bootstrap write failure $bootstrap_fail_after changed the project"
+  done
+
+  pass 'bootstrap_full'
 }
 
 fastlane_templates() {
@@ -5258,6 +5585,7 @@ run_test_group() {
     project_transaction) project_transaction ;;
     gradle_signing) gradle_signing ;;
     bootstrap_core) bootstrap_core ;;
+    bootstrap_full) bootstrap_full ;;
     fastlane_templates) fastlane_templates ;;
     flutter_sdk_installer) flutter_sdk_installer ;;
     workflow_template) workflow_template ;;
@@ -5273,6 +5601,7 @@ if [ "$#" -eq 0 ] || [ "${1-}" = all ]; then
   project_transaction
   gradle_signing
   bootstrap_core
+  bootstrap_full
   fastlane_templates
   flutter_sdk_installer
   workflow_template

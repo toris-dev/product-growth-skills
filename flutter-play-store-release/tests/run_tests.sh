@@ -5710,6 +5710,227 @@ RUBY
   pass 'workflow_template'
 }
 
+release_validator_run() {
+  validator_description=$1
+  validator_expected=$2
+  shift 2
+  validator_index=$((validator_index + 1))
+  VALIDATOR_STDOUT="$VALIDATOR_ROOT/$validator_index.stdout"
+  VALIDATOR_STDERR="$VALIDATOR_ROOT/$validator_index.stderr"
+  if "$@" >"$VALIDATOR_STDOUT" 2>"$VALIDATOR_STDERR"; then
+    validator_actual=0
+  else
+    validator_actual=$?
+  fi
+  [ "$validator_actual" -eq "$validator_expected" ] || {
+    sed -n '1,160p' "$VALIDATOR_STDOUT" >&2
+    sed -n '1,160p' "$VALIDATOR_STDERR" >&2
+    fail "$validator_description (expected exit $validator_expected, got $validator_actual)"
+  }
+}
+
+release_validator() {
+  VALIDATOR="$PACKAGE_ROOT/scripts/validate_release_setup.sh"
+  VALIDATOR_ROOT="$TMP_ROOT/release validator"
+  validator_project="$VALIDATOR_ROOT/project with spaces"
+  validator_stubs="$VALIDATOR_ROOT/stubs"
+  validator_log="$VALIDATOR_ROOT/commands.log"
+  validator_forbidden="$VALIDATOR_ROOT/external-contact"
+  validator_index=0
+  mkdir -p "$validator_stubs"
+
+  inspection_make_minimal_kotlin "$validator_project"
+  "$PACKAGE_ROOT/scripts/bootstrap_android_fastlane.sh" --project "$validator_project" \
+    >"$VALIDATOR_ROOT/bootstrap.stdout" 2>"$VALIDATOR_ROOT/bootstrap.stderr" ||
+    fail 'could not create the validator fixture'
+
+  for validator_tool in flutter ruby bundle java git curl gh fastlane
+  do
+    cat >"$validator_stubs/$validator_tool" <<'STUB'
+#!/usr/bin/env bash
+tool=${0##*/}
+printf '%s %s\n' "$tool" "$*" >> "${FPRS_COMMAND_LOG:?}"
+case "$tool" in
+  curl|gh|fastlane)
+    : > "${FPRS_FORBIDDEN_MARKER:?}"
+    exit 97
+    ;;
+  git)
+    [ "${FPRS_TRACKED_SECRET-}" = 1 ] && printf '%s\n' 'android/upload.jks'
+    exit 0
+    ;;
+  ruby)
+    case " $* " in
+      *' require "yaml" '*) [ "${FPRS_NO_YAML_PARSER-}" = 1 ] && exit 1 ;;
+    esac
+    exit 0
+    ;;
+esac
+exit 0
+STUB
+    chmod +x "$validator_stubs/$validator_tool"
+  done
+
+  validator_env="PATH=$validator_stubs:$PATH"
+  : > "$validator_log"
+  find "$validator_project" -type f -print | LC_ALL=C sort | while IFS= read -r file
+  do
+    printf '%s  %s\n' "$(bootstrap_full_sha256 "$file")" "${file#$validator_project/}"
+  done > "$VALIDATOR_ROOT/before.sha256"
+  release_validator_run 'read-only doctor failed' 0 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    APP_PACKAGE_NAME=com.example.kotlin "$VALIDATOR" --project "$validator_project"
+  grep -E '^PASS (package_name|plugin|track|toolchain\.flutter):' \
+    "$VALIDATOR_STDOUT" >/dev/null 2>&1 || fail 'doctor omitted Fastlane-parity check names'
+  grep -E '^(PASS|WARN) signing:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'doctor omitted the Fastlane-parity signing check name'
+  grep -F 'WARN project.commands:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'doctor did not report project commands as not run'
+  ! grep -E 'flutter (pub get|analyze|test|build)' "$validator_log" >/dev/null 2>&1 ||
+    fail 'doctor ran a project-mutating Flutter command'
+  find "$validator_project" -type f -print | LC_ALL=C sort | while IFS= read -r file
+  do
+    printf '%s  %s\n' "$(bootstrap_full_sha256 "$file")" "${file#$validator_project/}"
+  done > "$VALIDATOR_ROOT/after.sha256"
+  assert_same_file "$VALIDATOR_ROOT/before.sha256" "$VALIDATOR_ROOT/after.sha256" \
+    'doctor changed the project tree'
+
+  validator_groovy="$VALIDATOR_ROOT/groovy project"
+  inspection_write_pubspec "$validator_groovy" dev_dependencies
+  inspection_write_wrapper "$validator_groovy" 8.7
+  cat > "$validator_groovy/android/settings.gradle" <<'GRADLE'
+plugins {
+    id "com.android.application" version "8.5.2" apply false
+}
+GRADLE
+  cat > "$validator_groovy/android/app/build.gradle" <<'GRADLE'
+android {
+    namespace "com.example.release"
+    defaultConfig {
+        applicationId "com.example.release"
+        versionCode 45
+        versionName "1.2.3"
+    }
+}
+GRADLE
+  "$PACKAGE_ROOT/scripts/bootstrap_android_fastlane.sh" --project "$validator_groovy" \
+    >"$VALIDATOR_ROOT/groovy-bootstrap.stdout" 2>"$VALIDATOR_ROOT/groovy-bootstrap.stderr" ||
+    fail 'could not bootstrap the Groovy validator fixture'
+  release_validator_run 'Groovy signing validation failed' 0 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    APP_PACKAGE_NAME=com.example.release "$VALIDATOR" --project "$validator_groovy"
+  grep -F 'PASS signing.gradle:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'Groovy user-owned release signing was not validated'
+
+  cp "$validator_project/android/app/build.gradle.kts" "$VALIDATOR_ROOT/gradle.good"
+  sed 's/getByName("release")/getByName("debug")/' "$VALIDATOR_ROOT/gradle.good" \
+    > "$validator_project/android/app/build.gradle.kts"
+  release_validator_run 'release-to-debug signing was accepted' 1 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    APP_PACKAGE_NAME=com.example.kotlin "$VALIDATOR" --project "$validator_project"
+  grep -F 'FAIL signing.gradle:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'release-to-debug signing did not fail by name'
+  cp "$VALIDATOR_ROOT/gradle.good" "$validator_project/android/app/build.gradle.kts"
+
+  printf '\n// BEGIN flutter-play-store-release schema=1\n' \
+    >> "$validator_project/android/app/build.gradle.kts"
+  release_validator_run 'duplicate signing marker was accepted' 1 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    APP_PACKAGE_NAME=com.example.kotlin "$VALIDATOR" --project "$validator_project"
+  grep -F 'FAIL ownership.markers:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'duplicate ownership marker did not fail by name'
+  cp "$VALIDATOR_ROOT/gradle.good" "$validator_project/android/app/build.gradle.kts"
+
+  cp "$validator_project/.gitignore" "$VALIDATOR_ROOT/gitignore.good"
+  grep -Fv 'android/key.properties' "$VALIDATOR_ROOT/gitignore.good" \
+    > "$validator_project/.gitignore"
+  release_validator_run 'missing ignore rule was accepted' 1 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    APP_PACKAGE_NAME=com.example.kotlin "$VALIDATOR" --project "$validator_project"
+  grep -F 'FAIL gitignore.required:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'missing ignore rule did not fail by name'
+  cp "$VALIDATOR_ROOT/gitignore.good" "$validator_project/.gitignore"
+
+  release_validator_run 'setup opt-in commands failed' 0 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    APP_PACKAGE_NAME=com.example.kotlin "$VALIDATOR" --project "$validator_project" \
+    --context setup --run-project-commands
+  grep -F 'flutter pub get' "$validator_log" >/dev/null 2>&1 ||
+    fail 'setup opt-in omitted flutter pub get'
+  grep -F 'flutter analyze' "$validator_log" >/dev/null 2>&1 ||
+    fail 'setup opt-in omitted flutter analyze'
+  grep -F 'bundle exec fastlane android doctor' "$validator_log" >/dev/null 2>&1 ||
+    fail 'setup opt-in omitted Fastlane doctor'
+
+  release_validator_run 'build opt-in commands failed' 0 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    APP_PACKAGE_NAME=com.example.kotlin "$VALIDATOR" --project "$validator_project" \
+    --context build --run-project-commands
+  grep -F 'flutter build appbundle --release' "$validator_log" >/dev/null 2>&1 ||
+    fail 'build opt-in omitted AAB verification'
+
+  release_validator_run 'doctor accepted project command opt-in' 2 \
+    "$VALIDATOR" --project "$validator_project" --run-project-commands
+  release_validator_run 'deploy accepted missing credentials' 1 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    "$VALIDATOR" --project "$validator_project" --context deploy
+  grep -F 'FAIL package_name:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'deploy did not fail the shared package-name check'
+  grep -F 'FAIL credentials.play:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'deploy did not fail the shared credential check'
+
+  release_validator_run 'package mismatch was accepted' 1 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    APP_PACKAGE_NAME=com.example.wrong "$VALIDATOR" --project "$validator_project"
+  grep -F 'FAIL package_name:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'package mismatch was not deterministic'
+
+  cp "$validator_project/.github/workflows/release-android.yml" \
+    "$VALIDATOR_ROOT/workflow.good"
+  printf '\nactive_package: CHANGE_ME_APPLICATION_ID\n' \
+    >> "$validator_project/.github/workflows/release-android.yml"
+  release_validator_run 'active placeholder was accepted' 1 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    APP_PACKAGE_NAME=com.example.kotlin "$VALIDATOR" --project "$validator_project"
+  grep -F 'FAIL placeholders.active:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'active placeholder did not fail by name'
+  cp "$VALIDATOR_ROOT/workflow.good" \
+    "$validator_project/.github/workflows/release-android.yml"
+  printf '\nservice_account: "-----BEGIN PRIVATE KEY-----unsafe"\n' \
+    >> "$validator_project/.github/workflows/release-android.yml"
+  release_validator_run 'credential-shaped active content was accepted' 1 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    APP_PACKAGE_NAME=com.example.kotlin "$VALIDATOR" --project "$validator_project"
+  grep -F 'FAIL secrets.content:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'credential-shaped content did not fail by name'
+  mv "$VALIDATOR_ROOT/workflow.good" \
+    "$validator_project/.github/workflows/release-android.yml"
+
+  release_validator_run 'tracked secret filename was accepted' 1 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    FPRS_TRACKED_SECRET=1 APP_PACKAGE_NAME=com.example.kotlin \
+    "$VALIDATOR" --project "$validator_project"
+  grep -F 'FAIL secrets.tracked_names:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'tracked secret filename did not fail by name'
+
+  release_validator_run 'missing YAML parser was treated as success' 0 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    FPRS_NO_YAML_PARSER=1 APP_PACKAGE_NAME=com.example.kotlin \
+    "$VALIDATOR" --project "$validator_project" --format json
+  [ "$(wc -l < "$VALIDATOR_STDOUT" | tr -d ' ')" -eq 1 ] ||
+    fail 'JSON validator output was not exactly one line'
+  grep -F '"level":"WARN","name":"yaml.parser"' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'missing YAML parser was not an explicit JSON warning'
+
+  release_validator_run 'package-only validation failed' 0 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    "$VALIDATOR" --format human
+  grep -F 'WARN project.matrix:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'missing real project matrix was not reported'
+  [ ! -e "$validator_forbidden" ] || fail 'validator contacted an upload/network adapter'
+  pass 'release_validator'
+}
+
 run_test_group() {
   case "$1" in
     package_contract) package_contract ;;
@@ -5722,6 +5943,7 @@ run_test_group() {
     fastlane_templates) fastlane_templates ;;
     flutter_sdk_installer) flutter_sdk_installer ;;
     workflow_template) workflow_template ;;
+    release_validator) release_validator ;;
     *) fail "unknown test group: $1" ;;
   esac
 }
@@ -5738,6 +5960,7 @@ if [ "$#" -eq 0 ] || [ "${1-}" = all ]; then
   fastlane_templates
   flutter_sdk_installer
   workflow_template
+  release_validator
 else
   for requested_group in "$@"
   do

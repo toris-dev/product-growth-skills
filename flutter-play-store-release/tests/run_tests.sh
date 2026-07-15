@@ -360,12 +360,15 @@ secret_codecs_round_trips() {
   assert_empty_file "$CODEC_ROOT/text decode.stderr" 'successful decoding wrote to stderr'
 
   printf '\000\001\002\177\200\377binary\nbytes\000' > "$CODEC_ROOT/binary input"
+  printf 'stale encoded output' > "$CODEC_ROOT/binary encoded"
+  chmod 644 "$CODEC_ROOT/binary encoded"
   printf 'unchanged' > "$CODEC_ROOT/binary output"
   (umask 000; "$ENCODER" --input - --output "$CODEC_ROOT/binary encoded" \
     < "$CODEC_ROOT/binary input") \
     > "$CODEC_ROOT/binary encode.stdout" 2> "$CODEC_ROOT/binary encode.stderr" ||
     fail 'stdin-to-file encoding failed'
   assert_empty_file "$CODEC_ROOT/binary encode.stdout" 'file encoding emitted payload to stdout'
+  assert_mode '600' "$CODEC_ROOT/binary encoded" 'replaced encoded output mode'
   (umask 000; "$DECODER" --input "$CODEC_ROOT/binary encoded" --output "$CODEC_ROOT/binary output") \
     > "$CODEC_ROOT/binary decode.stdout" 2> "$CODEC_ROOT/binary decode.stderr" ||
     fail 'file-to-file binary decoding failed'
@@ -534,31 +537,224 @@ secret_codecs_strictness() {
     "$CODEC_ROOT/argument input" \
     'argument parsing modified explicit input'
 
-  redaction_canary='FPRS_RAW_SECRET_CANARY_7d06d4'
+  redaction_raw='FPRS_RAW_SECRET_CANARY_7d06d4'
   redaction_encoded='RlBSU19SQVdfU0VDUkVUX0NBTkFSWV83ZDA2ZDQ='
-  if printf '%s!' "$redaction_canary" | "$DECODER" \
-    > "$CODEC_ROOT/redaction.stdout" 2> "$CODEC_ROOT/redaction.stderr"
-  then
-    fail 'redaction invalid-input probe unexpectedly succeeded'
-  else
-    redaction_status=$?
-  fi
-  [ "$redaction_status" -eq 1 ] || fail 'invalid secret did not use exit 1'
-  assert_empty_file "$CODEC_ROOT/redaction.stdout" 'redaction failure emitted payload'
-  if grep -F "$redaction_canary" "$CODEC_ROOT/redaction.stderr" >/dev/null 2>&1 ||
-    grep -F "$redaction_encoded" "$CODEC_ROOT/redaction.stderr" >/dev/null 2>&1
-  then
-    fail 'secret codec diagnostics exposed a unique canary'
-  fi
+  mkdir -p "$CODEC_ROOT/redaction logs" "$CODEC_ROOT/redaction shim"
+  cat > "$CODEC_ROOT/redaction shim/base64" <<'SH'
+#!/bin/sh
+case "${1-}" in
+  -w|-b)
+    [ "${2-}" = 0 ] || exit 64
+    payload=$(cat)
+    if [ -z "$payload" ]; then
+      exit 0
+    fi
+    printf '%s' "$payload"
+    printf '%s' "$payload" >&2
+    exit 70
+    ;;
+  *) exit 64 ;;
+esac
+SH
+  chmod +x "$CODEC_ROOT/redaction shim/base64"
 
-  if grep -E '(^|[[:space:]])set[[:space:]]+-[^[:space:]]*x' \
+  redaction_index=0
+  for redaction_payload in "$redaction_raw" "$redaction_encoded"
+  do
+    redaction_index=$((redaction_index + 1))
+    if printf '%s' "$redaction_payload" | PATH="$CODEC_ROOT/redaction shim:$PATH" "$ENCODER" \
+      > "$CODEC_ROOT/redaction logs/encode-$redaction_index.stdout" \
+      2> "$CODEC_ROOT/redaction logs/encode-$redaction_index.stderr"
+    then
+      fail 'encoder redaction failure probe unexpectedly succeeded'
+    else
+      redaction_status=$?
+    fi
+    [ "$redaction_status" -eq 1 ] || fail 'encoder redaction probe did not use exit 1'
+  done
+
+  redaction_index=0
+  for redaction_payload in "$redaction_raw" "$redaction_encoded"
+  do
+    redaction_index=$((redaction_index + 1))
+    if printf '%s!' "$redaction_payload" | "$DECODER" \
+      > "$CODEC_ROOT/redaction logs/decode-$redaction_index.stdout" \
+      2> "$CODEC_ROOT/redaction logs/decode-$redaction_index.stderr"
+    then
+      fail 'decoder redaction failure probe unexpectedly succeeded'
+    else
+      redaction_status=$?
+    fi
+    [ "$redaction_status" -eq 1 ] || fail 'decoder redaction probe did not use exit 1'
+  done
+
+  for redaction_log in "$CODEC_ROOT/redaction logs"/*.stdout
+  do
+    assert_empty_file "$redaction_log" 'secret codec failure emitted a payload'
+  done
+  for redaction_log in "$CODEC_ROOT/redaction logs"/*.stdout "$CODEC_ROOT/redaction logs"/*.stderr
+  do
+    if grep -F "$redaction_raw" "$redaction_log" >/dev/null 2>&1 ||
+      grep -F "$redaction_encoded" "$redaction_log" >/dev/null 2>&1
+    then
+      fail 'secret codec failure logs exposed a unique canary'
+    fi
+  done
+
+  if grep -E '(^|[[:space:]])set[[:space:]]+(-[^[:space:]]*x|-o[[:space:]]+xtrace)|^#!.*[[:space:]]+-[^[:space:]]*x' \
     "$COMMON" "$ENCODER" "$DECODER" >/dev/null 2>&1
   then
     fail 'secret codec scripts enable shell tracing'
   fi
 }
 
+secret_codecs_publication_races() {
+  race_real_base64=$(command -v base64) || fail 'base64 is required for publication race tests'
+  mkdir -p "$CODEC_ROOT/publication race/shim"
+  cat > "$CODEC_ROOT/publication race/shim/base64" <<'SH'
+#!/bin/sh
+if [ ! -e "$FPRS_RACE_OUTPUT" ]; then
+  mkdir "$FPRS_RACE_OUTPUT" || exit 70
+fi
+exec "$FPRS_REAL_BASE64" "$@"
+SH
+  chmod +x "$CODEC_ROOT/publication race/shim/base64"
+
+  for race_codec in encode decode
+  do
+    race_output="$CODEC_ROOT/publication race/$race_codec target"
+    case "$race_codec" in
+      encode)
+        race_command=$ENCODER
+        race_input="$CODEC_ROOT/text input"
+        ;;
+      decode)
+        race_command=$DECODER
+        race_input="$CODEC_ROOT/text encoded"
+        ;;
+    esac
+
+    if PATH="$CODEC_ROOT/publication race/shim:$PATH" \
+      FPRS_REAL_BASE64="$race_real_base64" FPRS_RACE_OUTPUT="$race_output" \
+      "$race_command" --input "$race_input" --output "$race_output" \
+      > "$CODEC_ROOT/publication race/$race_codec.stdout" \
+      2> "$CODEC_ROOT/publication race/$race_codec.stderr"
+    then
+      fail "$race_codec accepted a publication directory race"
+    else
+      race_status=$?
+    fi
+    [ "$race_status" -eq 1 ] || fail "$race_codec publication race did not use exit 1"
+    assert_empty_file \
+      "$CODEC_ROOT/publication race/$race_codec.stdout" \
+      "$race_codec publication race emitted a payload"
+    [ -d "$race_output" ] || fail "$race_codec publication race fixture was not injected"
+    race_leak=$(find "$race_output" -mindepth 1 -print | sed -n '1p')
+    [ -z "$race_leak" ] || fail "$race_codec left secret data under an injected directory"
+  done
+
+  race_leftover=$(find "$CODEC_ROOT/publication race" -type d -name '.fprs-secret-codec.*' \
+    -print | sed -n '1p')
+  [ -z "$race_leftover" ] || fail 'publication race left an invocation-owned directory'
+  pass 'publication_race_regression'
+}
+
+secret_codec_signal_case() {
+  signal_name=$1
+  signal_codec_name=$2
+  signal_root="$CODEC_ROOT/signal $signal_codec_name $signal_name"
+  signal_fifo="$signal_root/input"
+  signal_output="$signal_root/output"
+  mkdir -p "$signal_root"
+  mkdir "$signal_root/.fprs-secret-codec.keep"
+  printf 'pre-existing-lookalike' > "$signal_root/.fprs-secret-codec.keep/sentinel"
+  mkfifo "$signal_fifo"
+
+  case "$signal_codec_name" in
+    encode)
+      signal_command=$ENCODER
+      signal_prefix='signal-encode-input'
+      ;;
+    decode)
+      signal_command=$DECODER
+      signal_prefix='Zm9v'
+      printf 'preserve-decoder-output' > "$signal_output"
+      chmod 640 "$signal_output"
+      cp "$signal_output" "$signal_output.before"
+      ;;
+    *) fail 'unknown signal codec fixture' ;;
+  esac
+
+  (printf '%s' "$signal_prefix"; while :; do :; done) > "$signal_fifo" &
+  signal_writer=$!
+  python3 -c '
+import os
+import signal
+import sys
+for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(signum, signal.SIG_DFL)
+os.execv(sys.argv[1], sys.argv[1:])
+' "$signal_command" --input "$signal_fifo" --output "$signal_output" \
+    > "$signal_root/stdout" 2> "$signal_root/stderr" &
+  signal_codec=$!
+
+  signal_ready=false
+  signal_attempt=0
+  while [ "$signal_attempt" -lt 100 ]; do
+    if find "$signal_root" -type d -name '.fprs-secret-codec.*' \
+      ! -name '.fprs-secret-codec.keep' -print |
+      grep . >/dev/null 2>&1
+    then
+      signal_ready=true
+      break
+    fi
+    signal_attempt=$((signal_attempt + 1))
+    sleep 0.02
+  done
+  if [ "$signal_ready" != true ]; then
+    kill -TERM "$signal_codec" "$signal_writer" >/dev/null 2>&1 || true
+    wait "$signal_codec" >/dev/null 2>&1 || true
+    wait "$signal_writer" >/dev/null 2>&1 || true
+    fail "$signal_name signal test could not observe $signal_codec_name staging"
+  fi
+
+  kill -"$signal_name" "$signal_codec" >/dev/null 2>&1 || true
+  kill -TERM "$signal_writer" >/dev/null 2>&1 || true
+  if wait "$signal_codec"; then
+    wait "$signal_writer" >/dev/null 2>&1 || true
+    fail "$signal_name-interrupted $signal_codec_name returned success"
+  else
+    signal_status=$?
+  fi
+  wait "$signal_writer" >/dev/null 2>&1 || true
+
+  [ "$signal_status" -eq 1 ] ||
+    fail "$signal_name-interrupted $signal_codec_name did not use exit 1"
+  assert_empty_file "$signal_root/stdout" "$signal_name-interrupted $signal_codec_name emitted payload"
+  signal_leftover=$(find "$signal_root" -type d -name '.fprs-secret-codec.*' \
+    ! -name '.fprs-secret-codec.keep' -print | sed -n '1p')
+  [ -z "$signal_leftover" ] ||
+    fail "$signal_name-interrupted $signal_codec_name left a temporary directory"
+  [ -f "$signal_root/.fprs-secret-codec.keep/sentinel" ] ||
+    fail "$signal_name-interrupted $signal_codec_name removed a pre-existing lookalike"
+
+  case "$signal_codec_name" in
+    encode)
+      [ ! -e "$signal_output" ] ||
+        fail "$signal_name-interrupted encoder published an explicit output"
+      ;;
+    decode)
+      assert_same_file \
+        "$signal_output.before" \
+        "$signal_output" \
+        "$signal_name-interrupted decoder changed prior output"
+      assert_mode '640' "$signal_output" "$signal_name-interrupted decoder changed prior output mode"
+      ;;
+  esac
+}
+
 secret_codecs_platform_and_cleanup() {
+  command -v python3 >/dev/null 2>&1 || fail 'python3 is required for codec publication tests'
   real_base64=$(command -v base64) || fail 'base64 is required for codec tests'
   if printf '' | "$real_base64" --decode >/dev/null 2>&1; then
     real_decode_flag=--decode
@@ -637,8 +833,9 @@ case "${1-}" in
     ;;
   -w|-b)
     [ "${2-}" = 0 ] || exit 64
-    cat >/dev/null
-    exit 0
+    payload=$(cat)
+    [ -z "$payload" ] && exit 0
+    exit 70
     ;;
   *) exit 64 ;;
 esac
@@ -663,62 +860,82 @@ SH
     'Base64 tool failure replaced prior output'
   assert_mode '640' "$CODEC_ROOT/tool failure output" 'Base64 tool failure changed prior output mode'
 
+  printf 'encoder-failure-sentinel' > "$CODEC_ROOT/encode tool failure output"
+  chmod 640 "$CODEC_ROOT/encode tool failure output"
+  cp "$CODEC_ROOT/encode tool failure output" "$CODEC_ROOT/encode tool failure output.before"
+  if PATH="$CODEC_ROOT/failing shim:$PATH" "$ENCODER" \
+    --input "$CODEC_ROOT/text input" --output "$CODEC_ROOT/encode tool failure output" \
+    > "$CODEC_ROOT/encode tool failure.stdout" 2> "$CODEC_ROOT/encode tool failure.stderr"
+  then
+    fail 'encoder accepted a Base64 tool failure'
+  else
+    tool_failure_status=$?
+  fi
+  [ "$tool_failure_status" -eq 1 ] || fail 'encoder Base64 tool failure did not use exit 1'
+  assert_empty_file "$CODEC_ROOT/encode tool failure.stdout" 'encoder Base64 tool failure emitted payload'
+  assert_same_file \
+    "$CODEC_ROOT/encode tool failure output.before" \
+    "$CODEC_ROOT/encode tool failure output" \
+    'encoder Base64 tool failure replaced prior output'
+  assert_mode '640' "$CODEC_ROOT/encode tool failure output" 'encoder tool failure changed prior output mode'
+
   mkdir -p "$CODEC_ROOT/cleanup tmp" "$CODEC_ROOT/cleanup output"
   mkdir "$CODEC_ROOT/cleanup tmp/.fprs-secret-codec.keep"
   mkdir "$CODEC_ROOT/cleanup output/.fprs-secret-codec.keep"
   printf 'owned sentinel' > "$CODEC_ROOT/cleanup tmp/.fprs-secret-codec.keep/sentinel"
   printf 'owned sentinel' > "$CODEC_ROOT/cleanup output/.fprs-secret-codec.keep/sentinel"
+  TMPDIR="$CODEC_ROOT/cleanup tmp" "$ENCODER" --input "$CODEC_ROOT/text input" \
+    --output "$CODEC_ROOT/cleanup output/encoded success" ||
+    fail 'encoder cleanup success setup failed'
   TMPDIR="$CODEC_ROOT/cleanup tmp" "$DECODER" --input "$CODEC_ROOT/text encoded" \
-    > /dev/null || fail 'cleanup success setup failed'
-  if TMPDIR="$CODEC_ROOT/cleanup tmp" "$DECODER" --input "$CODEC_ROOT/invalid-alphabet.input" \
-    > /dev/null 2> "$CODEC_ROOT/cleanup error.stderr"
+    --output "$CODEC_ROOT/cleanup output/decoded success" ||
+    fail 'decoder cleanup success setup failed'
+  assert_same_file \
+    "$CODEC_ROOT/text input" \
+    "$CODEC_ROOT/cleanup output/decoded success" \
+    'decoder cleanup success changed bytes'
+
+  printf 'preserve-encode-error' > "$CODEC_ROOT/cleanup output/encode error"
+  cp "$CODEC_ROOT/cleanup output/encode error" "$CODEC_ROOT/cleanup output/encode error.before"
+  if PATH="$CODEC_ROOT/failing shim:$PATH" TMPDIR="$CODEC_ROOT/cleanup tmp" \
+    "$ENCODER" --input "$CODEC_ROOT/text input" \
+    --output "$CODEC_ROOT/cleanup output/encode error" \
+    > "$CODEC_ROOT/cleanup encode error.stdout" 2> "$CODEC_ROOT/cleanup encode error.stderr"
   then
-    fail 'cleanup error setup unexpectedly succeeded'
+    fail 'encoder cleanup error setup unexpectedly succeeded'
   fi
+  assert_same_file \
+    "$CODEC_ROOT/cleanup output/encode error.before" \
+    "$CODEC_ROOT/cleanup output/encode error" \
+    'encoder cleanup error changed explicit output'
+
+  printf 'preserve-decode-error' > "$CODEC_ROOT/cleanup output/decode error"
+  cp "$CODEC_ROOT/cleanup output/decode error" "$CODEC_ROOT/cleanup output/decode error.before"
+  if TMPDIR="$CODEC_ROOT/cleanup tmp" "$DECODER" --input "$CODEC_ROOT/invalid-alphabet.input" \
+    --output "$CODEC_ROOT/cleanup output/decode error" \
+    > "$CODEC_ROOT/cleanup decode error.stdout" 2> "$CODEC_ROOT/cleanup decode error.stderr"
+  then
+    fail 'decoder cleanup error setup unexpectedly succeeded'
+  fi
+  assert_same_file \
+    "$CODEC_ROOT/cleanup output/decode error.before" \
+    "$CODEC_ROOT/cleanup output/decode error" \
+    'decoder cleanup error changed explicit output'
   [ -f "$CODEC_ROOT/cleanup tmp/.fprs-secret-codec.keep/sentinel" ] ||
     fail 'cleanup removed a pre-existing TMPDIR lookalike'
   [ -f "$CODEC_ROOT/cleanup output/.fprs-secret-codec.keep/sentinel" ] ||
     fail 'cleanup removed a pre-existing output lookalike'
-  cleanup_leftover=$(find "$CODEC_ROOT/cleanup tmp" -type d -name '.fprs-secret-codec.*' \
+  cleanup_leftover=$(find "$CODEC_ROOT/cleanup tmp" "$CODEC_ROOT/cleanup output" \
+    -type d -name '.fprs-secret-codec.*' \
     ! -name '.fprs-secret-codec.keep' -print | sed -n '1p')
   [ -z "$cleanup_leftover" ] || fail 'temporary directory remained after success or error'
 
-  signal_fifo="$CODEC_ROOT/signal input"
-  mkfifo "$signal_fifo"
-  (printf 'Zm9v'; while :; do :; done) > "$signal_fifo" &
-  signal_writer=$!
-  TMPDIR="$CODEC_ROOT/cleanup tmp" "$DECODER" --input "$signal_fifo" \
-    --output "$CODEC_ROOT/cleanup output/result" \
-    > "$CODEC_ROOT/signal.stdout" 2> "$CODEC_ROOT/signal.stderr" &
-  signal_codec=$!
-  signal_ready=false
-  signal_attempt=0
-  while [ "$signal_attempt" -lt 100 ]; do
-    if find "$CODEC_ROOT/cleanup output" -type d -name '.fprs-secret-codec.*' \
-      ! -name '.fprs-secret-codec.keep' -print | grep . >/dev/null 2>&1
-    then
-      signal_ready=true
-      break
-    fi
-    signal_attempt=$((signal_attempt + 1))
-    sleep 0.02
+  for signal_name in HUP INT TERM
+  do
+    secret_codec_signal_case "$signal_name" encode
+    secret_codec_signal_case "$signal_name" decode
   done
-  if [ "$signal_ready" != true ]; then
-    kill -TERM "$signal_codec" "$signal_writer" >/dev/null 2>&1 || true
-    wait "$signal_codec" >/dev/null 2>&1 || true
-    wait "$signal_writer" >/dev/null 2>&1 || true
-    fail 'signal cleanup test could not observe an invocation-owned directory'
-  fi
-  kill -TERM "$signal_codec" >/dev/null 2>&1 || true
-  kill -TERM "$signal_writer" >/dev/null 2>&1 || true
-  if wait "$signal_codec"; then
-    wait "$signal_writer" >/dev/null 2>&1 || true
-    fail 'TERM-interrupted decoder returned success'
-  fi
-  wait "$signal_writer" >/dev/null 2>&1 || true
-  signal_leftover=$(find "$CODEC_ROOT/cleanup output" -type d -name '.fprs-secret-codec.*' \
-    ! -name '.fprs-secret-codec.keep' -print | sed -n '1p')
-  [ -z "$signal_leftover" ] || fail 'temporary directory remained after TERM'
+  pass 'signal_status_cleanup_regression'
   [ -f "$CODEC_ROOT/cleanup output/.fprs-secret-codec.keep/sentinel" ] ||
     fail 'signal cleanup removed a pre-existing lookalike'
 
@@ -755,6 +972,7 @@ secret_codecs() {
   secret_codecs_helpers
   secret_codecs_round_trips
   secret_codecs_strictness
+  secret_codecs_publication_races
   secret_codecs_platform_and_cleanup
   pass 'secret_codecs'
 }

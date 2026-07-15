@@ -163,3 +163,21 @@ fprs_cleanup_dir() {
   [ ! -L "$fprs_dir" ] || return 1
   rm -rf -- "$fprs_dir"
 }
+
+fprs_atomic_replace() {
+  if [ "$#" -ne 2 ] || [ ! -f "$1" ]; then
+    return 1
+  fi
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 -c '
+import os
+import sys
+replace = getattr(os, "replace", None)
+if replace is None:
+    raise SystemExit(1)
+try:
+    replace(sys.argv[1], sys.argv[2])
+except OSError:
+    raise SystemExit(1)
+' "$1" "$2" >/dev/null 2>&1
+}

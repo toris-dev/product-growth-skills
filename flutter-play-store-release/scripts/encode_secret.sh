@@ -19,9 +19,9 @@ fprs_codec_cleanup() {
 }
 
 trap 'fprs_codec_cleanup $?' EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'exit 1' HUP
+trap 'exit 1' INT
+trap 'exit 1' TERM
 
 fprs_codec_usage_error() {
   printf 'ERROR: invalid or ambiguous arguments\n' >&2
@@ -103,6 +103,11 @@ else
     fprs_die 'output directory is unavailable'
   }
   [ -d "$fprs_codec_stage_parent" ] || fprs_die 'output directory is unavailable'
+  fprs_codec_output_name=${fprs_codec_output##*/}
+  case "$fprs_codec_stage_parent" in
+    /) fprs_codec_publish_path=/$fprs_codec_output_name ;;
+    *) fprs_codec_publish_path=$fprs_codec_stage_parent/$fprs_codec_output_name ;;
+  esac
 fi
 
 if [ "$fprs_codec_input" != - ] && [ "$fprs_codec_output" != - ]; then
@@ -160,6 +165,6 @@ chmod 600 "$fprs_codec_staged" 2>/dev/null || fprs_die 'could not secure encoded
 if [ "$fprs_codec_output" = - ]; then
   cat "$fprs_codec_staged" || fprs_die 'could not write encoded secret'
 else
-  mv -f -- "$fprs_codec_staged" "$fprs_codec_output" 2>/dev/null ||
+  fprs_atomic_replace "$fprs_codec_staged" "$fprs_codec_publish_path" ||
     fprs_die 'could not publish encoded secret'
 fi

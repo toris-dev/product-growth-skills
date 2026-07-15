@@ -102,6 +102,184 @@ fprs_gradle_signing_guard_check() {
   return 0
 }
 
+fprs_gradle_signing_extract_emitted_contract() {
+  [ "$#" -eq 2 ] && [ -f "$1" ] && [ ! -L "$1" ] || return 2
+  awk '
+    function quoted_csv(value,    result, token) {
+      result = ""
+      while (match(value, /"[A-Za-z][A-Za-z0-9_]*"/)) {
+        token = substr(value, RSTART + 1, RLENGTH - 2)
+        result = result (result == "" ? "" : ",") token
+        value = substr(value, RSTART + RLENGTH)
+      }
+      return result
+    }
+    function quoted_value(value) {
+      if (!match(value, /"[A-Za-z][A-Za-z0-9_.-]*"/)) return ""
+      return substr(value, RSTART + 1, RLENGTH - 2)
+    }
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      if (line ~ /^[[:space:]]*(def|val)[[:space:]]+fprsTerminalTaskPrefixes[[:space:]]*=/) {
+        terminal_count++
+        terminal = quoted_csv(line)
+      } else if (line ~ /^[[:space:]]*(def|val)[[:space:]]+fprsContainingTaskPrefixes[[:space:]]*=/) {
+        containing_count++
+        containing = quoted_csv(line)
+      } else if (line ~ /^[[:space:]]*(def|val)[[:space:]]+fprsReleaseToken[[:space:]]*=/) {
+        token_count++
+        release_token = quoted_value(line)
+      } else if (line ~ /^[[:space:]]*(def|val)[[:space:]]+fprsSigningPropertyKeys[[:space:]]*=/) {
+        keys_count++
+        keys = quoted_csv(line)
+      } else if (line ~ /^[[:space:]]*(def|val)[[:space:]]+fprsPropertiesEnvironment[[:space:]]*=/) {
+        environment_count++
+        environment = quoted_value(line)
+      } else if (line ~ /^[[:space:]]*(def|val)[[:space:]]+fprsPropertiesFallback[[:space:]]*=/) {
+        fallback_count++
+        fallback = quoted_value(line)
+      }
+    }
+    END {
+      if (terminal_count != 1 || containing_count != 1 || token_count != 1 ||
+          keys_count != 1 || environment_count != 1 || fallback_count != 1 ||
+          terminal == "" || containing == "" || release_token == "" ||
+          keys == "" || environment == "" || fallback == "") exit 2
+      print "terminal_task_prefixes=" terminal
+      print "containing_task_prefixes=" containing
+      print "release_token=" release_token
+      print "property_keys=" keys
+      print "properties_environment=" environment
+      print "properties_fallback=" fallback
+    }
+  ' "$1" > "$2"
+}
+
+fprs_gradle_signing_contract_value() {
+  [ "$#" -eq 2 ] || return 2
+  awk -F= -v key="$1" '
+    $1 == key { count++; value = substr($0, length(key) + 2) }
+    END { if (count != 1 || value == "") exit 1; print value }
+  ' "$2"
+}
+
+fprs_gradle_signing_contract_task_requires_credentials() {
+  [ "$#" -gt 1 ] || return 1
+  local fprs_gradle_contract fprs_gradle_terminal fprs_gradle_containing
+  local fprs_gradle_token fprs_gradle_requested fprs_gradle_direct
+  local fprs_gradle_prefix
+  fprs_gradle_contract=$1
+  shift
+  fprs_gradle_terminal=$(fprs_gradle_signing_contract_value \
+    terminal_task_prefixes "$fprs_gradle_contract") || return 2
+  fprs_gradle_containing=$(fprs_gradle_signing_contract_value \
+    containing_task_prefixes "$fprs_gradle_contract") || return 2
+  fprs_gradle_token=$(fprs_gradle_signing_contract_value \
+    release_token "$fprs_gradle_contract") || return 2
+  fprs_gradle_terminal=$(printf '%s' "$fprs_gradle_terminal" | tr ',' ' ')
+  fprs_gradle_containing=$(printf '%s' "$fprs_gradle_containing" | tr ',' ' ')
+  for fprs_gradle_requested in "$@"
+  do
+    fprs_gradle_direct=${fprs_gradle_requested##*:}
+    fprs_gradle_direct=$(printf '%s' "$fprs_gradle_direct" |
+      tr '[:upper:]' '[:lower:]') || return 2
+    for fprs_gradle_prefix in $fprs_gradle_terminal
+    do
+      case "$fprs_gradle_direct" in
+        "$fprs_gradle_prefix"*"$fprs_gradle_token") return 0 ;;
+      esac
+    done
+    for fprs_gradle_prefix in $fprs_gradle_containing
+    do
+      case "$fprs_gradle_direct" in
+        "$fprs_gradle_prefix"*"$fprs_gradle_token"*) return 0 ;;
+      esac
+    done
+  done
+  return 1
+}
+
+fprs_gradle_signing_contract_properties_path() {
+  [ "$#" -eq 2 ] && [ -n "$2" ] || return 2
+  local fprs_gradle_contract_environment fprs_gradle_contract_fallback
+  local fprs_gradle_contract_override
+  fprs_gradle_contract_environment=$(fprs_gradle_signing_contract_value \
+    properties_environment "$1") || return 2
+  fprs_gradle_contract_fallback=$(fprs_gradle_signing_contract_value \
+    properties_fallback "$1") || return 2
+  case "$fprs_gradle_contract_environment" in
+    [A-Za-z_]* ) ;;
+    *) return 2 ;;
+  esac
+  case "$fprs_gradle_contract_environment" in *[!A-Za-z0-9_]*) return 2 ;; esac
+  case "$fprs_gradle_contract_fallback" in
+    ''|/*|*/*|.|..) return 2 ;;
+  esac
+  if fprs_gradle_contract_override=$(printenv \
+    "$fprs_gradle_contract_environment" 2>/dev/null)
+  then
+    printf '%s\n' "$fprs_gradle_contract_override"
+  else
+    printf '%s/%s\n' "${2%/}" "$fprs_gradle_contract_fallback"
+  fi
+}
+
+fprs_gradle_signing_contract_guard_check() {
+  [ "$#" -eq 3 ] || return 2
+  local fprs_gradle_contract fprs_gradle_task fprs_gradle_android_root
+  local fprs_gradle_properties fprs_gradle_keys fprs_gradle_key
+  local fprs_gradle_values fprs_gradle_store_file fprs_gradle_keystore
+  local fprs_gradle_task_status
+  fprs_gradle_contract=$1
+  fprs_gradle_task=$2
+  fprs_gradle_android_root=$3
+  if fprs_gradle_signing_contract_task_requires_credentials \
+    "$fprs_gradle_contract" "$fprs_gradle_task"
+  then
+    :
+  else
+    fprs_gradle_task_status=$?
+    [ "$fprs_gradle_task_status" -eq 1 ] && return 0
+    return 2
+  fi
+  fprs_gradle_properties=$(fprs_gradle_signing_contract_properties_path \
+    "$fprs_gradle_contract" "$fprs_gradle_android_root") || return 2
+  if [ ! -f "$fprs_gradle_properties" ] || [ -L "$fprs_gradle_properties" ]; then
+    printf 'ERROR: Android release signing properties file is missing\n' >&2
+    return 1
+  fi
+  fprs_gradle_keys=$(fprs_gradle_signing_contract_value \
+    property_keys "$fprs_gradle_contract") || return 2
+  fprs_gradle_keys=$(printf '%s' "$fprs_gradle_keys" | tr ',' ' ')
+  set -- $fprs_gradle_keys
+  [ "$#" -eq 4 ] || return 2
+  fprs_gradle_values=
+  for fprs_gradle_key in "$@"
+  do
+    case "$fprs_gradle_key" in [A-Za-z]* ) ;; *) return 2 ;; esac
+    case "$fprs_gradle_key" in *[!A-Za-z0-9_]*) return 2 ;; esac
+    fprs_gradle_key=$(fprs_gradle_signing_property_value \
+      "$fprs_gradle_properties" "$fprs_gradle_key") || {
+      printf 'ERROR: Android release signing properties are incomplete\n' >&2
+      return 1
+    }
+    if [ -z "$fprs_gradle_values" ]; then
+      fprs_gradle_store_file=$fprs_gradle_key
+    fi
+    fprs_gradle_values="$fprs_gradle_values x"
+  done
+  case "$fprs_gradle_store_file" in
+    /*) fprs_gradle_keystore=$fprs_gradle_store_file ;;
+    *) fprs_gradle_keystore="${fprs_gradle_android_root%/}/app/$fprs_gradle_store_file" ;;
+  esac
+  if [ ! -f "$fprs_gradle_keystore" ]; then
+    printf 'ERROR: Android release keystore file is missing\n' >&2
+    return 1
+  fi
+  return 0
+}
+
 fprs_gradle_signing_file_mode() {
   [ "$#" -eq 1 ] && [ -e "$1" ] || return 1
   local fprs_gradle_mode
@@ -122,12 +300,18 @@ fprs_gradle_signing_file_mode() {
 fprs_gradle_signing_groovy_block() {
   cat <<'GRADLE'
     // BEGIN flutter-play-store-release schema=1
-    def fprsKeyPropertiesPath = providers.environmentVariable("ANDROID_KEY_PROPERTIES_PATH").orNull
-    def fprsKeyPropertiesFile = fprsKeyPropertiesPath != null ? file(fprsKeyPropertiesPath) : rootProject.file("key.properties")
+    def fprsTerminalTaskPrefixes = ["assemble", "bundle"]
+    def fprsContainingTaskPrefixes = ["publish"]
+    def fprsReleaseToken = "release"
+    def fprsSigningPropertyKeys = ["storeFile", "storePassword", "keyAlias", "keyPassword"]
+    def fprsPropertiesEnvironment = "ANDROID_KEY_PROPERTIES_PATH"
+    def fprsPropertiesFallback = "key.properties"
+    def fprsKeyPropertiesPath = providers.environmentVariable(fprsPropertiesEnvironment).orNull
+    def fprsKeyPropertiesFile = fprsKeyPropertiesPath != null ? file(fprsKeyPropertiesPath) : rootProject.file(fprsPropertiesFallback)
     def fprsReleaseSigningTaskRequested = gradle.startParameter.taskNames.any { fprsRequestedTask ->
         def fprsDirectTask = fprsRequestedTask.tokenize(":").last().toLowerCase(java.util.Locale.ROOT)
-        ((fprsDirectTask.startsWith("assemble") || fprsDirectTask.startsWith("bundle")) && fprsDirectTask.endsWith("release")) ||
-            (fprsDirectTask.startsWith("publish") && fprsDirectTask.contains("release"))
+        fprsTerminalTaskPrefixes.any { fprsPrefix -> fprsDirectTask.startsWith(fprsPrefix) && fprsDirectTask.endsWith(fprsReleaseToken) } ||
+            fprsContainingTaskPrefixes.any { fprsPrefix -> fprsDirectTask.startsWith(fprsPrefix) && fprsDirectTask.contains(fprsReleaseToken) }
     }
     def fprsKeyProperties = new java.util.Properties()
     if (fprsReleaseSigningTaskRequested) {
@@ -135,10 +319,10 @@ fprs_gradle_signing_groovy_block() {
             fprsKeyPropertiesFile.withInputStream { fprsInput -> fprsKeyProperties.load(fprsInput) }
         }
     }
-    def fprsStoreFileValue = fprsKeyProperties.getProperty("storeFile")
-    def fprsStorePasswordValue = fprsKeyProperties.getProperty("storePassword")
-    def fprsKeyAliasValue = fprsKeyProperties.getProperty("keyAlias")
-    def fprsKeyPasswordValue = fprsKeyProperties.getProperty("keyPassword")
+    def fprsStoreFileValue = fprsKeyProperties.getProperty(fprsSigningPropertyKeys[0])
+    def fprsStorePasswordValue = fprsKeyProperties.getProperty(fprsSigningPropertyKeys[1])
+    def fprsKeyAliasValue = fprsKeyProperties.getProperty(fprsSigningPropertyKeys[2])
+    def fprsKeyPasswordValue = fprsKeyProperties.getProperty(fprsSigningPropertyKeys[3])
     def fprsSigningValuesComplete = [fprsStoreFileValue, fprsStorePasswordValue, fprsKeyAliasValue, fprsKeyPasswordValue].every {
         fprsValue -> fprsValue != null && !fprsValue.trim().isEmpty()
     }
@@ -175,12 +359,18 @@ GRADLE
 fprs_gradle_signing_kotlin_block() {
   cat <<'KOTLIN'
     // BEGIN flutter-play-store-release schema=1
-    val fprsKeyPropertiesPath = providers.environmentVariable("ANDROID_KEY_PROPERTIES_PATH").orNull
-    val fprsKeyPropertiesFile = if (fprsKeyPropertiesPath != null) file(fprsKeyPropertiesPath) else rootProject.file("key.properties")
+    val fprsTerminalTaskPrefixes = listOf("assemble", "bundle")
+    val fprsContainingTaskPrefixes = listOf("publish")
+    val fprsReleaseToken = "release"
+    val fprsSigningPropertyKeys = listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
+    val fprsPropertiesEnvironment = "ANDROID_KEY_PROPERTIES_PATH"
+    val fprsPropertiesFallback = "key.properties"
+    val fprsKeyPropertiesPath = providers.environmentVariable(fprsPropertiesEnvironment).orNull
+    val fprsKeyPropertiesFile = if (fprsKeyPropertiesPath != null) file(fprsKeyPropertiesPath) else rootProject.file(fprsPropertiesFallback)
     val fprsReleaseSigningTaskRequested = gradle.startParameter.taskNames.any { fprsRequestedTask ->
         val fprsDirectTask = fprsRequestedTask.substringAfterLast(':').lowercase(java.util.Locale.ROOT)
-        ((fprsDirectTask.startsWith("assemble") || fprsDirectTask.startsWith("bundle")) && fprsDirectTask.endsWith("release")) ||
-            (fprsDirectTask.startsWith("publish") && fprsDirectTask.contains("release"))
+        fprsTerminalTaskPrefixes.any { fprsPrefix -> fprsDirectTask.startsWith(fprsPrefix) && fprsDirectTask.endsWith(fprsReleaseToken) } ||
+            fprsContainingTaskPrefixes.any { fprsPrefix -> fprsDirectTask.startsWith(fprsPrefix) && fprsDirectTask.contains(fprsReleaseToken) }
     }
     val fprsKeyProperties = java.util.Properties()
     if (fprsReleaseSigningTaskRequested) {
@@ -188,10 +378,10 @@ fprs_gradle_signing_kotlin_block() {
             fprsKeyPropertiesFile.inputStream().use { fprsInput -> fprsKeyProperties.load(fprsInput) }
         }
     }
-    val fprsStoreFileValue = fprsKeyProperties.getProperty("storeFile")
-    val fprsStorePasswordValue = fprsKeyProperties.getProperty("storePassword")
-    val fprsKeyAliasValue = fprsKeyProperties.getProperty("keyAlias")
-    val fprsKeyPasswordValue = fprsKeyProperties.getProperty("keyPassword")
+    val fprsStoreFileValue = fprsKeyProperties.getProperty(fprsSigningPropertyKeys[0])
+    val fprsStorePasswordValue = fprsKeyProperties.getProperty(fprsSigningPropertyKeys[1])
+    val fprsKeyAliasValue = fprsKeyProperties.getProperty(fprsSigningPropertyKeys[2])
+    val fprsKeyPasswordValue = fprsKeyProperties.getProperty(fprsSigningPropertyKeys[3])
     val fprsSigningValuesComplete = listOf(fprsStoreFileValue, fprsStorePasswordValue, fprsKeyAliasValue, fprsKeyPasswordValue).all {
         fprsValue -> !fprsValue.isNullOrBlank()
     }
@@ -228,12 +418,26 @@ KOTLIN
 fprs_gradle_signing_validate_markers() {
   [ "$#" -eq 2 ] || return 1
   awk -v report="$2" '
-    function visible_text(raw,    output, i, character, next_character, sequence) {
+    function visible_text(raw,    output, i, character, next_character, sequence, pair, context) {
       output = ""
       for (i = 1; i <= length(raw); i++) {
         character = substr(raw, i, 1)
         next_character = substr(raw, i + 1, 1)
         sequence = substr(raw, i, 3)
+        pair = substr(raw, i, 2)
+        if (dollar_slashy) {
+          if (pair == "/$") {
+            dollar_slashy = 0
+            i++
+          }
+          continue
+        }
+        if (slashy) {
+          if (slashy_escaped) slashy_escaped = 0
+          else if (character == "\\") slashy_escaped = 1
+          else if (character == "/") slashy = 0
+          continue
+        }
         if (triple_quote != "") {
           if (sequence == triple_quote) {
             triple_quote = ""
@@ -259,6 +463,11 @@ fprs_gradle_signing_validate_markers() {
           i += 2
           continue
         }
+        if (pair == "$/") {
+          dollar_slashy = 1
+          i++
+          continue
+        }
         if (character == "/" && next_character == "*") {
           block_comment = 1
           i++
@@ -271,6 +480,14 @@ fprs_gradle_signing_validate_markers() {
         if (character == "/" && next_character == "/") {
           output = output substr(raw, i)
           break
+        }
+        if (character == "/" && next_character != "/" && next_character != "*") {
+          context = output
+          gsub(/[[:space:]]+$/, "", context)
+          if (context ~ /(=|\(|\[|,|:|return)$/) {
+            slashy = 1
+            continue
+          }
         }
         output = output character
       }
@@ -309,12 +526,26 @@ fprs_gradle_signing_strip_owned_block() {
 fprs_gradle_signing_scan() {
   [ "$#" -eq 3 ] || return 1
   awk -v dsl="$1" '
-    function uncomment(raw,    output, i, character, next_character, sequence) {
+    function uncomment(raw,    output, i, character, next_character, sequence, pair, context) {
       output = ""
       for (i = 1; i <= length(raw); i++) {
         character = substr(raw, i, 1)
         next_character = substr(raw, i + 1, 1)
         sequence = substr(raw, i, 3)
+        pair = substr(raw, i, 2)
+        if (dollar_slashy) {
+          if (pair == "/$") {
+            dollar_slashy = 0
+            i++
+          }
+          continue
+        }
+        if (slashy) {
+          if (slashy_escaped) slashy_escaped = 0
+          else if (character == "\\") slashy_escaped = 1
+          else if (character == "/") slashy = 0
+          continue
+        }
         if (triple_quote != "") {
           if (sequence == triple_quote) {
             triple_quote = ""
@@ -341,6 +572,11 @@ fprs_gradle_signing_scan() {
           i += 2
           continue
         }
+        if (pair == "$/") {
+          dollar_slashy = 1
+          i++
+          continue
+        }
         if (character == "/" && next_character == "*") {
           block_comment = 1
           i++
@@ -348,6 +584,14 @@ fprs_gradle_signing_scan() {
         }
         if (character == "/" && next_character == "/") break
         if (character == "\"" || character == "\047") quote = character
+        if (character == "/" && next_character != "/" && next_character != "*") {
+          context = output
+          gsub(/[[:space:]]+$/, "", context)
+          if (context ~ /(=|\(|\[|,|:|return)$/) {
+            slashy = 1
+            continue
+          }
+        }
         output = output character
       }
       return output
@@ -380,7 +624,10 @@ fprs_gradle_signing_scan() {
       compact = value
       gsub(/[[:space:]\r;]/, "", compact)
       if (dsl == "groovy") {
-        if (compact == "signingConfigsigningConfigs.debug" || compact == "signingConfig=signingConfigs.debug") {
+        if (compact == "signingConfigsigningConfigs.debug" ||
+            compact == "signingConfig=signingConfigs.debug" ||
+            compact == "setSigningConfig(signingConfigs.debug)" ||
+            compact == "setSigningConfigsigningConfigs.debug") {
           assignment_name = "debug"
           return "debug"
         }
@@ -389,14 +636,27 @@ fprs_gradle_signing_scan() {
           assignment_name = compact
           return "custom"
         }
+        if (compact ~ /^setSigningConfig\(?signingConfigs\.[A-Za-z][A-Za-z0-9_]*\)?$/) {
+          sub(/^setSigningConfig\(?signingConfigs\./, "", compact)
+          sub(/\)$/, "", compact)
+          assignment_name = compact
+          return "custom"
+        }
       } else {
-        if (compact == "signingConfig=signingConfigs.getByName(\"debug\")") {
+        if (compact == "signingConfig=signingConfigs.getByName(\"debug\")" ||
+            compact == "setSigningConfig(signingConfigs.getByName(\"debug\"))") {
           assignment_name = "debug"
           return "debug"
         }
         if (compact ~ /^signingConfig=signingConfigs\.getByName\(\"[A-Za-z][A-Za-z0-9_]*\"\)$/) {
           sub(/^signingConfig=signingConfigs\.getByName\(\"/, "", compact)
           sub(/\"\)$/, "", compact)
+          assignment_name = compact
+          return "custom"
+        }
+        if (compact ~ /^setSigningConfig\(signingConfigs\.getByName\(\"[A-Za-z][A-Za-z0-9_]*\"\)\)$/) {
+          sub(/^setSigningConfig\(signingConfigs\.getByName\(\"/, "", compact)
+          sub(/\"\)\)$/, "", compact)
           assignment_name = compact
           return "custom"
         }
@@ -441,7 +701,8 @@ fprs_gradle_signing_scan() {
         }
         if (declaration_name != "") declarations[declaration_name]++
       }
-      if (release_depth > 0 && before_depth == release_depth && stripped ~ /signingConfig/) {
+      if (release_depth > 0 && before_depth == release_depth &&
+          (stripped ~ /signingConfig/ || stripped ~ /setSigningConfig/)) {
         kind = assignment_kind(stripped)
         assignments++
         if (kind == "debug") {
@@ -465,7 +726,8 @@ fprs_gradle_signing_scan() {
       }
     }
     END {
-      if (depth != 0 || block_comment || quote != "" || triple_quote != "") malformed = 1
+      if (depth != 0 || block_comment || quote != "" || triple_quote != "" ||
+          slashy || dollar_slashy) malformed = 1
       print "android_count=" android_count
       print "android_open=" android_open
       print "android_close=" android_close
@@ -486,6 +748,92 @@ fprs_gradle_signing_scan() {
 fprs_gradle_signing_report_value() {
   [ "$#" -eq 2 ] || return 1
   sed -n "s/^$1=//p" "$2" | sed -n '1p'
+}
+
+fprs_gradle_signing_publish_candidate() {
+  [ "$#" -eq 2 ] || return 1
+  local fprs_gradle_publish_attempt
+  if [ "${FPRS_TEST_MODE-}" = 1 ] &&
+    [ -n "${FPRS_TEST_GRADLE_CONTROL_DIR-}" ]
+  then
+    [ -d "$FPRS_TEST_GRADLE_CONTROL_DIR" ] &&
+      [ ! -L "$FPRS_TEST_GRADLE_CONTROL_DIR" ] || return 1
+    printf 'ready\n' > "$FPRS_TEST_GRADLE_CONTROL_DIR/before-publish.new" ||
+      return 1
+    mv "$FPRS_TEST_GRADLE_CONTROL_DIR/before-publish.new" \
+      "$FPRS_TEST_GRADLE_CONTROL_DIR/before-publish" || return 1
+    fprs_gradle_publish_attempt=0
+    while [ ! -e "$FPRS_TEST_GRADLE_CONTROL_DIR/continue" ]
+    do
+      [ "$fprs_gradle_publish_attempt" -lt 500 ] || return 1
+      sleep 0.01
+      fprs_gradle_publish_attempt=$((fprs_gradle_publish_attempt + 1))
+    done
+  fi
+  python3 -c '
+import errno
+import os
+import signal
+import stat
+import sys
+
+source, destination = sys.argv[1:]
+descriptor = None
+created_identity = None
+
+def interrupted(signum, frame):
+    raise RuntimeError
+
+for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(signum, interrupted)
+
+try:
+    source_info = os.stat(source, follow_symlinks=False)
+    if not stat.S_ISREG(source_info.st_mode):
+        raise RuntimeError
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(destination, flags, 0o600)
+    except FileExistsError:
+        raise SystemExit(2)
+    except OSError as error:
+        if error.errno in (errno.EEXIST, errno.ELOOP):
+            raise SystemExit(2)
+        raise
+    installed = os.fstat(descriptor)
+    created_identity = (installed.st_dev, installed.st_ino)
+    if not stat.S_ISREG(installed.st_mode) or installed.st_nlink != 1:
+        raise RuntimeError
+    with open(source, "rb") as input_file:
+        while True:
+            chunk = input_file.read(65536)
+            if not chunk:
+                break
+            offset = 0
+            while offset < len(chunk):
+                offset += os.write(descriptor, chunk[offset:])
+    os.fchmod(descriptor, stat.S_IMODE(source_info.st_mode))
+    os.close(descriptor)
+    descriptor = None
+except SystemExit:
+    raise
+except BaseException:
+    if descriptor is not None:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    if created_identity is not None:
+        try:
+            current = os.stat(destination, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) == created_identity:
+                os.unlink(destination)
+        except OSError:
+            pass
+    raise SystemExit(1)
+' "$1" "$2" >/dev/null 2>&1
 }
 
 fprs_gradle_signing_candidate() {
@@ -534,6 +882,7 @@ fprs_gradle_signing_candidate() {
 
   local fprs_gradle_stage fprs_gradle_marker_status fprs_gradle_owned
   local fprs_gradle_clean fprs_gradle_block fprs_gradle_report
+  local fprs_gradle_private_output fprs_gradle_publish_status
   local fprs_gradle_original_report fprs_gradle_marker_report
   local fprs_gradle_marker_begin fprs_gradle_marker_end
   local fprs_gradle_original_android_count fprs_gradle_original_android_open
@@ -554,6 +903,7 @@ fprs_gradle_signing_candidate() {
   fprs_gradle_report="$fprs_gradle_stage/report"
   fprs_gradle_original_report="$fprs_gradle_stage/original-report"
   fprs_gradle_marker_report="$fprs_gradle_stage/markers"
+  fprs_gradle_private_output="$fprs_gradle_stage/candidate-output"
   fprs_gradle_owned=0
   if fprs_gradle_signing_validate_markers "$2" "$fprs_gradle_marker_report"; then
     fprs_gradle_marker_status=0
@@ -656,7 +1006,7 @@ fprs_gradle_signing_candidate() {
       rm -rf -- "$fprs_gradle_stage"
       return 2
     fi
-    cp "$2" "$fprs_gradle_output_absolute" 2>/dev/null || {
+    cp "$2" "$fprs_gradle_private_output" 2>/dev/null || {
       rm -rf -- "$fprs_gradle_stage"
       return 1
     }
@@ -664,10 +1014,19 @@ fprs_gradle_signing_candidate() {
       rm -rf -- "$fprs_gradle_stage"
       return 1
     }
-    chmod "$fprs_gradle_mode" "$fprs_gradle_output_absolute" 2>/dev/null || {
+    chmod "$fprs_gradle_mode" "$fprs_gradle_private_output" 2>/dev/null || {
       rm -rf -- "$fprs_gradle_stage"
       return 1
     }
+    fprs_gradle_signing_publish_candidate "$fprs_gradle_private_output" \
+      "$fprs_gradle_output_absolute"
+    fprs_gradle_publish_status=$?
+    if [ "$fprs_gradle_publish_status" -ne 0 ]; then
+      [ "$fprs_gradle_publish_status" -ne 2 ] ||
+        fprs_gradle_signing_error 'candidate output changed before publication'
+      rm -rf -- "$fprs_gradle_stage"
+      return "$fprs_gradle_publish_status"
+    fi
     FPRS_GRADLE_SIGNING_CLASSIFICATION=preserve
     rm -rf -- "$fprs_gradle_stage"
     return 0
@@ -706,21 +1065,27 @@ fprs_gradle_signing_candidate() {
       close(block)
     }
     NR != remove { print }
-  ' "$fprs_gradle_clean" > "$fprs_gradle_output_absolute" || {
-    rm -f -- "$fprs_gradle_output_absolute" 2>/dev/null || true
+  ' "$fprs_gradle_clean" > "$fprs_gradle_private_output" || {
     rm -rf -- "$fprs_gradle_stage"
     return 1
   }
   fprs_gradle_mode=$(fprs_gradle_signing_file_mode "$2") || {
-    rm -f -- "$fprs_gradle_output_absolute" 2>/dev/null || true
     rm -rf -- "$fprs_gradle_stage"
     return 1
   }
-  chmod "$fprs_gradle_mode" "$fprs_gradle_output_absolute" 2>/dev/null || {
-    rm -f -- "$fprs_gradle_output_absolute" 2>/dev/null || true
+  chmod "$fprs_gradle_mode" "$fprs_gradle_private_output" 2>/dev/null || {
     rm -rf -- "$fprs_gradle_stage"
     return 1
   }
+  fprs_gradle_signing_publish_candidate "$fprs_gradle_private_output" \
+    "$fprs_gradle_output_absolute"
+  fprs_gradle_publish_status=$?
+  if [ "$fprs_gradle_publish_status" -ne 0 ]; then
+    [ "$fprs_gradle_publish_status" -ne 2 ] ||
+      fprs_gradle_signing_error 'candidate output changed before publication'
+    rm -rf -- "$fprs_gradle_stage"
+    return "$fprs_gradle_publish_status"
+  fi
   if [ "$fprs_gradle_owned" -eq 1 ]; then
     FPRS_GRADLE_SIGNING_CLASSIFICATION=update-owned
   else

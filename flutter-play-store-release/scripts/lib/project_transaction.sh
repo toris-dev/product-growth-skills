@@ -191,9 +191,9 @@ fprs_project_transaction_begin() {
   }
   fprs_project_transaction_save_traps
   command -v python3 >/dev/null 2>&1 || {
-    fprs_project_transaction_error 'Python 3 is required for race-safe publication'
+    fprs_project_transaction_error 'transaction runtime is unavailable'
     fprs_project_transaction_restore_traps
-    return 1
+    return 3
   }
   FPRS_PROJECT_TRANSACTION_STAGE=$(mktemp -d \
     "${TMPDIR:-/tmp}/.fprs-project-transaction.XXXXXX" 2>/dev/null) || {
@@ -226,7 +226,7 @@ except BaseException:
   then
     fprs_project_transaction_error 'could not pin the project root identity'
     fprs_project_transaction_cleanup >/dev/null 2>&1 || true
-    return 1
+    return 3
   fi
   FPRS_PROJECT_TRANSACTION_ACTIVE=1
   FPRS_PROJECT_TRANSACTION_COUNT=0
@@ -302,6 +302,33 @@ fprs_project_transaction_register() {
       fprs_project_transaction_error 'could not preserve original bytes'
       return 1
     }
+    if ! python3 -c '
+import os
+import stat
+import sys
+target, original, output = sys.argv[1:]
+try:
+    info = os.stat(target, follow_symlinks=False)
+    if not stat.S_ISREG(info.st_mode):
+        raise RuntimeError
+    with open(target, "rb") as left, open(original, "rb") as right:
+        while True:
+            left_chunk = left.read(65536)
+            right_chunk = right.read(65536)
+            if left_chunk != right_chunk:
+                raise RuntimeError
+            if not left_chunk:
+                break
+    with open(output, "w", encoding="ascii") as identity:
+        identity.write("%d\n%d\n" % (info.st_dev, info.st_ino))
+except BaseException:
+    raise SystemExit(1)
+' "$fprs_transaction_target" "$fprs_transaction_record/original" \
+      "$fprs_transaction_record/target-identity" >/dev/null 2>&1
+    then
+      fprs_project_transaction_error "target changed while it was staged: $1"
+      return 2
+    fi
   else
     fprs_transaction_mode=$(fprs_project_transaction_file_mode "$2") || return 1
     printf 'no\n' > "$fprs_transaction_record/existed" || return 1
@@ -391,670 +418,614 @@ fprs_project_transaction_validate() {
   return 0
 }
 
-fprs_project_transaction_boundary() {
-  [ "${FPRS_TEST_MODE-}" = 1 ] || return 0
-  local fprs_transaction_boundary fprs_transaction_relative
-  fprs_transaction_boundary=$1
-  fprs_transaction_relative=${2-}
-  if type fprs_project_transaction_test_hook >/dev/null 2>&1; then
-    fprs_project_transaction_test_hook "$fprs_transaction_boundary" \
-      "$fprs_transaction_relative" || return 1
-  fi
-  if [ "${FPRS_TEST_SIGNAL_AT-}" = "$fprs_transaction_boundary" ]; then
-    kill -TERM "$$"
-  fi
-  return 0
-}
-
-fprs_project_transaction_pin_root() {
-  [ "$#" -eq 0 ] || return 1
-  if ! exec 8< "$FPRS_PROJECT_TRANSACTION_ROOT"; then
-    return 1
-  fi
-  FPRS_PROJECT_TRANSACTION_ROOT_FD_OPEN=1
-  python3 -c '
-import os
-import stat
-import sys
-root, identity_path = sys.argv[1:]
-try:
-    with open(identity_path, encoding="ascii") as source:
-        values = source.read().splitlines()
-    if len(values) != 2:
-        raise RuntimeError
-    expected = (int(values[0]), int(values[1]))
-    descriptor = os.fstat(8)
-    current = os.stat(root, follow_symlinks=False)
-    if not stat.S_ISDIR(descriptor.st_mode) or not stat.S_ISDIR(current.st_mode):
-        raise RuntimeError
-    if (descriptor.st_dev, descriptor.st_ino) != expected:
-        raise RuntimeError
-    if (current.st_dev, current.st_ino) != expected:
-        raise RuntimeError
-except BaseException:
-    raise SystemExit(1)
-' "$FPRS_PROJECT_TRANSACTION_ROOT" \
-    "$FPRS_PROJECT_TRANSACTION_STAGE/root-identity" >/dev/null 2>&1
-}
-
-fprs_project_transaction_prepare_temp() {
-  [ "$#" -eq 7 ] || return 1
-  python3 -c '
-import os
-import signal
-import stat
-import sys
-
-record, root_path, relative, candidate, mode_text, existed, original = sys.argv[1:]
-target_name = relative.split("/")[-1]
-temp_name = ".fprs-project-write." + os.path.basename(record)
-state_path = os.path.join(record, "temp-state")
-created = False
-
-def interrupted(signum, frame):
-    raise RuntimeError("interrupted")
-
-for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
-    signal.signal(signum, interrupted)
-
-def pinned_parent():
-    root_path_stat = os.stat(root_path, follow_symlinks=False)
-    root_fd_stat = os.fstat(8)
-    fd_stat = os.fstat(9)
-    if not stat.S_ISDIR(root_path_stat.st_mode) or not stat.S_ISDIR(root_fd_stat.st_mode):
-        raise RuntimeError("root is not a directory")
-    if (root_path_stat.st_dev, root_path_stat.st_ino) != (root_fd_stat.st_dev, root_fd_stat.st_ino):
-        raise RuntimeError("root identity changed")
-    flags = os.O_RDONLY
-    if hasattr(os, "O_DIRECTORY"):
-        flags |= os.O_DIRECTORY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    walked_fd = os.dup(8)
-    try:
-        for component in relative.split("/")[:-1]:
-            next_fd = os.open(component, flags, dir_fd=walked_fd)
-            os.close(walked_fd)
-            walked_fd = next_fd
-        walked_stat = os.fstat(walked_fd)
-    finally:
-        os.close(walked_fd)
-    if (walked_stat.st_dev, walked_stat.st_ino) != (fd_stat.st_dev, fd_stat.st_ino):
-        raise RuntimeError("parent identity changed")
-    return fd_stat
-
-def compare_file(fd, path):
-    with os.fdopen(fd, "rb", closefd=True) as left, open(path, "rb") as right:
-        while True:
-            a = left.read(65536)
-            b = right.read(65536)
-            if a != b:
-                return False
-            if not a:
-                return True
-
-def validate_target():
-    try:
-        target_stat = os.stat(target_name, dir_fd=9, follow_symlinks=False)
-    except FileNotFoundError:
-        target_stat = None
-    if existed == "yes":
-        if target_stat is None or not stat.S_ISREG(target_stat.st_mode):
-            raise RuntimeError("target changed")
-        if stat.S_IMODE(target_stat.st_mode) != int(mode_text, 8):
-            raise RuntimeError("target mode changed")
-        flags = os.O_RDONLY
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        if not compare_file(os.open(target_name, flags, dir_fd=9), original):
-            raise RuntimeError("target bytes changed")
-    elif existed == "no":
-        if target_stat is not None:
-            raise RuntimeError("new target appeared")
-    else:
-        raise RuntimeError("invalid snapshot")
-
-try:
-    parent_stat = pinned_parent()
-    validate_target()
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    temp_fd = os.open(temp_name, flags, 0o600, dir_fd=9)
-    created = True
-    try:
-        with os.fdopen(temp_fd, "wb", closefd=True) as output, open(candidate, "rb") as source:
-            while True:
-                chunk = source.read(65536)
-                if not chunk:
-                    break
-                output.write(chunk)
-            output.flush()
-            os.fchmod(output.fileno(), int(mode_text, 8))
-        temp_stat = os.stat(temp_name, dir_fd=9, follow_symlinks=False)
-        if not stat.S_ISREG(temp_stat.st_mode) or temp_stat.st_nlink != 1:
-            raise RuntimeError("unsafe temporary file")
-        state_tmp = state_path + ".new"
-        with open(state_tmp, "w", encoding="ascii") as state:
-            state.write("%s\n%d\n%d\n%d\n%d\n" % (
-                temp_name, temp_stat.st_dev, temp_stat.st_ino,
-                parent_stat.st_dev, parent_stat.st_ino))
-            state.flush()
-        os.replace(state_tmp, state_path)
-    except BaseException:
-        try:
-            os.unlink(temp_name, dir_fd=9)
-        except OSError:
-            pass
-        raise
-except BaseException:
-    raise SystemExit(1)
-' "$1" "$2" "$3" "$4" "$5" "$6" "$7" >/dev/null 2>&1
-}
-
-fprs_project_transaction_publish_temp() {
-  [ "$#" -eq 7 ] || return 1
-  python3 -c '
-import os
-import signal
-import stat
-import sys
-
-record, root_path, relative, candidate, mode_text, existed, original = sys.argv[1:]
-target_name = relative.split("/")[-1]
-state_path = os.path.join(record, "temp-state")
-published_path = os.path.join(record, "published")
-
-def interrupted(signum, frame):
-    raise RuntimeError("interrupted")
-
-for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
-    signal.signal(signum, interrupted)
-
-def read_state():
-    with open(state_path, encoding="ascii") as state:
-        values = state.read().splitlines()
-    if len(values) != 5:
-        raise RuntimeError("invalid temp journal")
-    return values[0], tuple(int(value) for value in values[1:])
-
-def pinned_parent(expected):
-    root_path_stat = os.stat(root_path, follow_symlinks=False)
-    root_fd_stat = os.fstat(8)
-    fd_stat = os.fstat(9)
-    if not stat.S_ISDIR(root_path_stat.st_mode) or not stat.S_ISDIR(root_fd_stat.st_mode):
-        raise RuntimeError("root is not a directory")
-    if (root_path_stat.st_dev, root_path_stat.st_ino) != (root_fd_stat.st_dev, root_fd_stat.st_ino):
-        raise RuntimeError("root identity changed")
-    if (fd_stat.st_dev, fd_stat.st_ino) != expected:
-        raise RuntimeError("parent descriptor changed")
-    flags = os.O_RDONLY
-    if hasattr(os, "O_DIRECTORY"):
-        flags |= os.O_DIRECTORY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    walked_fd = os.dup(8)
-    try:
-        for component in relative.split("/")[:-1]:
-            next_fd = os.open(component, flags, dir_fd=walked_fd)
-            os.close(walked_fd)
-            walked_fd = next_fd
-        walked_stat = os.fstat(walked_fd)
-    finally:
-        os.close(walked_fd)
-    if (walked_stat.st_dev, walked_stat.st_ino) != expected:
-        raise RuntimeError("parent path changed")
-
-def bytes_equal(name, expected_path):
-    flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    with os.fdopen(os.open(name, flags, dir_fd=9), "rb") as left, open(expected_path, "rb") as right:
-        while True:
-            a = left.read(65536)
-            b = right.read(65536)
-            if a != b:
-                return False
-            if not a:
-                return True
-
-def validate_target():
-    try:
-        target_stat = os.stat(target_name, dir_fd=9, follow_symlinks=False)
-    except FileNotFoundError:
-        target_stat = None
-    if existed == "yes":
-        if target_stat is None or not stat.S_ISREG(target_stat.st_mode):
-            raise RuntimeError("target changed")
-        if stat.S_IMODE(target_stat.st_mode) != int(mode_text, 8):
-            raise RuntimeError("target mode changed")
-        if not bytes_equal(target_name, original):
-            raise RuntimeError("target bytes changed")
-    elif existed == "no":
-        if target_stat is not None:
-            raise RuntimeError("new target appeared")
-    else:
-        raise RuntimeError("invalid snapshot")
-
-def restore_after_failed_journal(installed_identity):
-    try:
-        current = os.stat(target_name, dir_fd=9, follow_symlinks=False)
-        if (current.st_dev, current.st_ino) != installed_identity:
-            return
-        if existed == "no":
-            os.unlink(target_name, dir_fd=9)
-            return
-        recovery_name = ".fprs-project-recovery." + os.path.basename(record)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        recovery_fd = os.open(recovery_name, flags, 0o600, dir_fd=9)
-        try:
-            with os.fdopen(recovery_fd, "wb") as output, open(original, "rb") as source:
-                while True:
-                    chunk = source.read(65536)
-                    if not chunk:
-                        break
-                    output.write(chunk)
-                output.flush()
-                os.fchmod(output.fileno(), int(mode_text, 8))
-            os.replace(recovery_name, target_name, src_dir_fd=9, dst_dir_fd=9)
-        except BaseException:
-            try:
-                os.unlink(recovery_name, dir_fd=9)
-            except OSError:
-                pass
-            raise
-    except OSError:
-        pass
-
-installed_identity = None
-try:
-    temp_name, identity = read_state()
-    temp_dev, temp_ino, parent_dev, parent_ino = identity
-    pinned_parent((parent_dev, parent_ino))
-    temp_stat = os.stat(temp_name, dir_fd=9, follow_symlinks=False)
-    if (temp_stat.st_dev, temp_stat.st_ino) != (temp_dev, temp_ino):
-        raise RuntimeError("temporary identity changed")
-    validate_target()
-    os.replace(temp_name, target_name, src_dir_fd=9, dst_dir_fd=9)
-    installed = os.stat(target_name, dir_fd=9, follow_symlinks=False)
-    installed_identity = (installed.st_dev, installed.st_ino)
-    journal_tmp = published_path + ".new"
-    with open(journal_tmp, "w", encoding="ascii") as journal:
-        journal.write("%d\n%d\n" % installed_identity)
-        journal.flush()
-    os.replace(journal_tmp, published_path)
-except BaseException:
-    if installed_identity is not None and not os.path.exists(published_path):
-        restore_after_failed_journal(installed_identity)
-    raise SystemExit(1)
-' "$1" "$2" "$3" "$4" "$5" "$6" "$7" >/dev/null 2>&1
-}
-
-fprs_project_transaction_cleanup_current_temp() {
-  local fprs_transaction_record
-  fprs_transaction_record=$1
-  [ -f "$fprs_transaction_record/temp-state" ] || return 0
-  python3 -c '
-import os
-import stat
-import sys
-record = sys.argv[1]
-try:
-    with open(os.path.join(record, "temp-state"), encoding="ascii") as state:
-        values = state.read().splitlines()
-    if len(values) != 5:
-        raise RuntimeError
-    name = values[0]
-    expected = (int(values[1]), int(values[2]))
-    current = os.stat(name, dir_fd=9, follow_symlinks=False)
-    if (current.st_dev, current.st_ino) != expected or not stat.S_ISREG(current.st_mode):
-        raise RuntimeError
-    os.unlink(name, dir_fd=9)
-except FileNotFoundError:
-    pass
-except BaseException:
-    raise SystemExit(1)
-' "$fprs_transaction_record" >/dev/null 2>&1
-}
-
-fprs_project_transaction_atomic_copy() {
-  [ "$#" -eq 3 ] || return 1
-  local fprs_transaction_source fprs_transaction_target
-  local fprs_transaction_mode fprs_transaction_parent fprs_transaction_temp
-  local fprs_transaction_parent_physical
-  fprs_transaction_source=$1
-  fprs_transaction_target=$2
-  fprs_transaction_mode=$3
-  fprs_transaction_parent=${fprs_transaction_target%/*}
-  [ -d "$fprs_transaction_parent" ] && [ ! -L "$fprs_transaction_parent" ] || return 1
-  fprs_transaction_parent_physical=$(
-    CDPATH= cd -- "$fprs_transaction_parent" 2>/dev/null && pwd -P
-  ) || return 1
-  case "$fprs_transaction_parent_physical" in
-    "$FPRS_PROJECT_TRANSACTION_ROOT"|"$FPRS_PROJECT_TRANSACTION_ROOT"/*) ;;
-    *) return 1 ;;
-  esac
-  [ "$fprs_transaction_parent_physical" = "$fprs_transaction_parent" ] || return 1
-  fprs_transaction_temp=$(mktemp \
-    "$fprs_transaction_parent/.fprs-project-write.XXXXXX" 2>/dev/null) || return 1
-  if ! cp "$fprs_transaction_source" "$fprs_transaction_temp" 2>/dev/null ||
-    ! chmod "$fprs_transaction_mode" "$fprs_transaction_temp" 2>/dev/null ||
-    ! mv -f -- "$fprs_transaction_temp" "$fprs_transaction_target" 2>/dev/null
-  then
-    rm -f -- "$fprs_transaction_temp" 2>/dev/null || true
-    return 1
-  fi
-  return 0
-}
-
-fprs_project_transaction_ensure_parent() {
-  [ "$#" -eq 1 ] || return 1
-  local fprs_transaction_relative fprs_transaction_parent
-  local fprs_transaction_remaining fprs_transaction_component
-  local fprs_transaction_current fprs_transaction_next fprs_transaction_physical
-  local fprs_transaction_index fprs_transaction_record
-  fprs_transaction_relative=$1
-  fprs_transaction_parent=${fprs_transaction_relative%/*}
-  [ "$fprs_transaction_parent" != "$fprs_transaction_relative" ] || return 0
-  fprs_transaction_remaining=$fprs_transaction_parent
-  fprs_transaction_current=$FPRS_PROJECT_TRANSACTION_ROOT
-  while [ -n "$fprs_transaction_remaining" ]
-  do
-    case "$fprs_transaction_remaining" in
-      */*)
-        fprs_transaction_component=${fprs_transaction_remaining%%/*}
-        fprs_transaction_remaining=${fprs_transaction_remaining#*/}
-        ;;
-      *)
-        fprs_transaction_component=$fprs_transaction_remaining
-        fprs_transaction_remaining=
-        ;;
-    esac
-    fprs_transaction_next="$fprs_transaction_current/$fprs_transaction_component"
-    [ ! -L "$fprs_transaction_next" ] || return 1
-    if [ ! -e "$fprs_transaction_next" ]; then
-      fprs_transaction_index=$((FPRS_PROJECT_TRANSACTION_CREATED_DIR_COUNT + 1))
-      fprs_transaction_record="$FPRS_PROJECT_TRANSACTION_STAGE/created-dirs/$(printf '%08d' "$fprs_transaction_index")"
-      printf '%s\n' "$fprs_transaction_next" > \
-        "$fprs_transaction_record.path" ||
-        return 1
-      FPRS_PROJECT_TRANSACTION_CREATED_DIR_COUNT=$fprs_transaction_index
-      python3 -c '
-import os
-import signal
-import stat
-import sys
-path, journal = sys.argv[1:]
-created = False
-def interrupted(signum, frame):
-    raise RuntimeError("interrupted")
-for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
-    signal.signal(signum, interrupted)
-try:
-    os.mkdir(path, 0o755)
-    created = True
-    info = os.stat(path, follow_symlinks=False)
-    if not stat.S_ISDIR(info.st_mode):
-        raise RuntimeError("created path is not a directory")
-    temporary = journal + ".new"
-    with open(temporary, "w", encoding="ascii") as output:
-        output.write("%d\n%d\n" % (info.st_dev, info.st_ino))
-        output.flush()
-    os.replace(temporary, journal)
-except BaseException:
-    if created:
-        try:
-            os.rmdir(path)
-        except OSError:
-            pass
-    raise SystemExit(1)
-' "$fprs_transaction_next" "$fprs_transaction_record.created" >/dev/null 2>&1 ||
-        return 1
-      fprs_project_transaction_boundary project-dir-created \
-        "$fprs_transaction_relative" || return 1
-    fi
-    [ -d "$fprs_transaction_next" ] && [ ! -L "$fprs_transaction_next" ] || return 1
-    fprs_transaction_physical=$(CDPATH= cd -- "$fprs_transaction_next" 2>/dev/null && pwd -P) ||
-      return 1
-    case "$fprs_transaction_physical" in
-      "$FPRS_PROJECT_TRANSACTION_ROOT"|"$FPRS_PROJECT_TRANSACTION_ROOT"/*) ;;
-      *) return 1 ;;
-    esac
-    fprs_transaction_current=$fprs_transaction_physical
-  done
-  return 0
-}
-
-fprs_project_transaction_remove_created_dirs() {
-  local fprs_transaction_index fprs_transaction_record fprs_transaction_dir
-  local fprs_transaction_failed
-  fprs_transaction_failed=0
-  fprs_transaction_index=$FPRS_PROJECT_TRANSACTION_CREATED_DIR_COUNT
-  while [ "$fprs_transaction_index" -ge 1 ]
-  do
-    fprs_transaction_record="$FPRS_PROJECT_TRANSACTION_STAGE/created-dirs/$(printf '%08d' "$fprs_transaction_index")"
-    fprs_transaction_dir=$(cat "$fprs_transaction_record.path" 2>/dev/null) || {
-      fprs_transaction_index=$((fprs_transaction_index - 1))
-      continue
-    }
-    if [ -f "$fprs_transaction_record.created" ]; then
-      if ! python3 -c '
-import os
-import stat
-import sys
-path, journal = sys.argv[1:]
-try:
-    with open(journal, encoding="ascii") as source:
-        values = source.read().splitlines()
-    if len(values) != 2:
-        raise RuntimeError
-    expected = (int(values[0]), int(values[1]))
-    current = os.stat(path, follow_symlinks=False)
-    if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != expected:
-        raise RuntimeError
-    os.rmdir(path)
-except FileNotFoundError:
-    pass
-except BaseException:
-    raise SystemExit(1)
-' "$fprs_transaction_dir" "$fprs_transaction_record.created" >/dev/null 2>&1
-      then
-        fprs_transaction_failed=1
-      fi
-    elif [ -e "$fprs_transaction_dir" ] || [ -L "$fprs_transaction_dir" ]; then
-      fprs_transaction_failed=1
-    fi
-    fprs_transaction_index=$((fprs_transaction_index - 1))
-  done
-  FPRS_PROJECT_TRANSACTION_CREATED_DIR_COUNT=0
-  [ "$fprs_transaction_failed" -eq 0 ]
-}
 
 fprs_project_transaction_rollback() {
-  local fprs_transaction_index fprs_transaction_record
-  local fprs_transaction_target fprs_transaction_relative
-  local fprs_transaction_existed fprs_transaction_mode fprs_transaction_failed
-  fprs_transaction_failed=0
-  fprs_transaction_index=$FPRS_PROJECT_TRANSACTION_COUNT
-  while [ "$fprs_transaction_index" -ge 1 ]
-  do
-    fprs_transaction_record=$(
-      fprs_project_transaction_record_dir "$fprs_transaction_index"
-    )
-    fprs_transaction_target=$(cat "$fprs_transaction_record/target" 2>/dev/null) || {
-      fprs_transaction_failed=1
-      fprs_transaction_index=$((fprs_transaction_index - 1))
-      continue
-    }
-    fprs_transaction_relative=$(cat "$fprs_transaction_record/relative" 2>/dev/null) ||
-      fprs_transaction_relative=$fprs_transaction_target
-    fprs_transaction_existed=$(cat "$fprs_transaction_record/existed" 2>/dev/null) ||
-      fprs_transaction_existed=invalid
-    fprs_transaction_mode=$(cat "$fprs_transaction_record/mode" 2>/dev/null) ||
-      fprs_transaction_mode=
-    if [ ! -f "$fprs_transaction_record/published" ]; then
-      if [ "$FPRS_PROJECT_TRANSACTION_FD_OPEN" -eq 1 ] &&
-        [ "$FPRS_PROJECT_TRANSACTION_CURRENT_RECORD" = "$fprs_transaction_record" ]
-      then
-        fprs_project_transaction_cleanup_current_temp "$fprs_transaction_record" ||
-          fprs_transaction_failed=1
-      fi
-      fprs_transaction_index=$((fprs_transaction_index - 1))
-      continue
-    fi
-    case "$fprs_transaction_existed" in
-      yes)
-        fprs_project_transaction_atomic_copy \
-          "$fprs_transaction_record/original" "$fprs_transaction_target" \
-          "$fprs_transaction_mode" || fprs_transaction_failed=1
-        ;;
-      no)
-        if [ -f "$fprs_transaction_target" ] &&
-          cmp -s "$fprs_transaction_record/candidate" "$fprs_transaction_target"
-        then
-          rm -f -- "$fprs_transaction_target" 2>/dev/null || fprs_transaction_failed=1
-        elif [ -e "$fprs_transaction_target" ] || [ -L "$fprs_transaction_target" ]; then
-          fprs_project_transaction_error \
-            "refused to remove changed transaction-created path: $fprs_transaction_relative"
-          fprs_transaction_failed=1
-        fi
-        ;;
-      *) fprs_transaction_failed=1 ;;
-    esac
-    fprs_transaction_index=$((fprs_transaction_index - 1))
-  done
-  if [ "$FPRS_PROJECT_TRANSACTION_FD_OPEN" -eq 1 ]; then
-    exec 9<&-
-    FPRS_PROJECT_TRANSACTION_FD_OPEN=0
-  fi
-  if [ "$FPRS_PROJECT_TRANSACTION_ROOT_FD_OPEN" -eq 1 ]; then
-    exec 8<&-
-    FPRS_PROJECT_TRANSACTION_ROOT_FD_OPEN=0
-  fi
-  FPRS_PROJECT_TRANSACTION_CURRENT_RECORD=
-  FPRS_PROJECT_TRANSACTION_APPLIED=0
-  fprs_project_transaction_remove_created_dirs || fprs_transaction_failed=1
-  [ "$fprs_transaction_failed" -eq 0 ]
+  # Project mutations and their rollback are owned by the single Python
+  # lifecycle invoked by commit. Before commit, there is nothing to undo.
+  return 0
 }
 
 fprs_project_transaction_signal() {
   trap - HUP INT TERM
   fprs_project_transaction_error "caught $1; rollback attempted"
-  fprs_project_transaction_rollback >/dev/null 2>&1 || true
   fprs_project_transaction_cleanup >/dev/null 2>&1 || true
   exit 3
 }
+
+fprs_project_transaction_run_python() {
+  [ "$#" -eq 10 ] || return 3
+  python3 -c '
+import contextlib
+import os
+import signal
+import stat
+import sys
+import time
+
+(
+    root_path,
+    stage,
+    count_text,
+    fail_after_text,
+    test_mode_text,
+    signal_at,
+    control_dir,
+    pause_at,
+    pause_relative,
+    hook_all_text,
+) = sys.argv[1:]
+
+
+class TransactionFailure(Exception):
+    pass
+
+
+class TransactionSignal(Exception):
+    pass
+
+
+signals = {signal.SIGHUP, signal.SIGINT, signal.SIGTERM}
+test_mode = test_mode_text == "1"
+hook_all = test_mode and hook_all_text == "1"
+event_sequence = 0
+published = []
+temporaries = []
+created_directories = []
+directory_fds = {}
+all_directory_fds = []
+root_fd = None
+root_identity = None
+rollback_started = False
+
+
+def interrupted(signum, frame):
+    raise TransactionSignal()
+
+
+for caught_signal in signals:
+    signal.signal(caught_signal, interrupted)
+
+
+def read_lines(path, expected=None):
+    with open(path, encoding="utf-8") as source:
+        values = source.read().splitlines()
+    if expected is not None and len(values) != expected:
+        raise TransactionFailure()
+    return values
+
+
+def read_one(path):
+    values = read_lines(path, 1)
+    if not values[0]:
+        raise TransactionFailure()
+    return values[0]
+
+
+def safe_components(relative):
+    if not relative or relative.startswith("/") or relative.endswith("/"):
+        raise TransactionFailure()
+    components = relative.split("/")
+    if any(component in ("", ".", "..") for component in components):
+        raise TransactionFailure()
+    if any("\n" in component or "\t" in component for component in components):
+        raise TransactionFailure()
+    return components
+
+
+def identity(info):
+    return (info.st_dev, info.st_ino)
+
+
+def open_directory(name, parent_fd=None):
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if parent_fd is None:
+        descriptor = os.open(name, flags)
+    else:
+        descriptor = os.open(name, flags, dir_fd=parent_fd)
+    info = os.fstat(descriptor)
+    if not stat.S_ISDIR(info.st_mode):
+        os.close(descriptor)
+        raise TransactionFailure()
+    all_directory_fds.append(descriptor)
+    return descriptor, info
+
+
+def lstat_at(parent_fd, name):
+    return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+
+
+def file_equal_at(parent_fd, name, expected_path):
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(name, flags, dir_fd=parent_fd)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            return False
+        with os.fdopen(os.dup(descriptor), "rb") as current, open(expected_path, "rb") as expected:
+            while True:
+                current_chunk = current.read(65536)
+                expected_chunk = expected.read(65536)
+                if current_chunk != expected_chunk:
+                    return False
+                if not current_chunk:
+                    return True
+    finally:
+        os.close(descriptor)
+
+
+def write_control_event(boundary, relative, critical):
+    global event_sequence
+    if not test_mode or not control_dir:
+        return
+    selected = hook_all or (
+        boundary == pause_at and (not pause_relative or relative == pause_relative)
+    )
+    if not selected:
+        return
+    event_sequence += 1
+    if hook_all:
+        event_path = os.path.join(control_dir, "event.%08d" % event_sequence)
+        answer_path = os.path.join(control_dir, "ack.%08d" % event_sequence)
+    else:
+        event_path = os.path.join(control_dir, "event")
+        answer_path = os.path.join(control_dir, "continue")
+    temporary_path = event_path + ".new.%d" % os.getpid()
+    with open(temporary_path, "w", encoding="utf-8") as event:
+        event.write("%d\n%s\n%s\n" % (os.getpgrp(), boundary, relative))
+        event.flush()
+    os.replace(temporary_path, event_path)
+    while True:
+        if os.path.exists(answer_path):
+            if hook_all:
+                answer = read_one(answer_path)
+                if answer != "0":
+                    raise TransactionFailure()
+            return
+        if critical and signal.sigpending().intersection(signals):
+            return
+        time.sleep(0.005)
+
+
+def test_boundary(boundary, relative, critical=False):
+    if not test_mode:
+        return
+    write_control_event(boundary, relative, critical)
+    if signal_at == boundary:
+        os.kill(os.getpid(), signal.SIGTERM)
+
+
+@contextlib.contextmanager
+def blocked_mutation():
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, signals)
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
+def verify_root_path():
+    current = os.stat(root_path, follow_symlinks=False)
+    if not stat.S_ISDIR(current.st_mode) or identity(current) != root_identity:
+        raise TransactionFailure()
+
+
+def cached_directory(parent_key, component, child_key):
+    parent_fd = directory_fds[parent_key]
+    descriptor = directory_fds[child_key]
+    path_info = lstat_at(parent_fd, component)
+    descriptor_info = os.fstat(descriptor)
+    if not stat.S_ISDIR(path_info.st_mode):
+        raise TransactionFailure()
+    if identity(path_info) != identity(descriptor_info):
+        raise TransactionFailure()
+    return descriptor
+
+
+def parent_for(components, relative):
+    key = ()
+    for component in components[:-1]:
+        child_key = key + (component,)
+        if child_key in directory_fds:
+            cached_directory(key, component, child_key)
+            key = child_key
+            continue
+        parent_fd = directory_fds[key]
+        try:
+            path_info = lstat_at(parent_fd, component)
+        except FileNotFoundError:
+            path_info = None
+        if path_info is None:
+            with blocked_mutation():
+                os.mkdir(component, 0o755, dir_fd=parent_fd)
+                test_boundary("project-dir-created", relative, True)
+                child_fd, child_info = open_directory(component, parent_fd)
+                created_directories.append({
+                    "parent_fd": parent_fd,
+                    "name": component,
+                    "fd": child_fd,
+                    "identity": identity(child_info),
+                })
+                directory_fds[child_key] = child_fd
+        else:
+            if not stat.S_ISDIR(path_info.st_mode):
+                raise TransactionFailure()
+            child_fd, child_info = open_directory(component, parent_fd)
+            if identity(path_info) != identity(child_info):
+                raise TransactionFailure()
+            directory_fds[child_key] = child_fd
+        key = child_key
+    return directory_fds[key]
+
+
+def verify_parent_reachable(components, expected_parent_fd):
+    verify_root_path()
+    descriptor = root_fd
+    for component in components[:-1]:
+        descriptor, unused = open_directory(component, descriptor)
+    if identity(os.fstat(descriptor)) != identity(os.fstat(expected_parent_fd)):
+        raise TransactionFailure()
+
+
+def validate_target(record, parent_fd):
+    name = record["components"][-1]
+    try:
+        current = lstat_at(parent_fd, name)
+    except FileNotFoundError:
+        current = None
+    if record["existed"]:
+        if current is None or not stat.S_ISREG(current.st_mode):
+            raise TransactionFailure()
+        if identity(current) != record["target_identity"]:
+            raise TransactionFailure()
+        if stat.S_IMODE(current.st_mode) != record["mode"]:
+            raise TransactionFailure()
+        if not file_equal_at(parent_fd, name, record["original"]):
+            raise TransactionFailure()
+    elif current is not None:
+        raise TransactionFailure()
+
+
+def make_temp(record, parent_fd, index):
+    stage_name = os.path.basename(stage)
+    name = ".fprs-project-write.%s.%08d" % (stage_name, index)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    with blocked_mutation():
+        descriptor = os.open(name, flags, 0o600, dir_fd=parent_fd)
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            os.close(descriptor)
+            raise TransactionFailure()
+        test_boundary("project-temp-created", record["relative"], True)
+        temporary = {
+            "parent_fd": parent_fd,
+            "name": name,
+            "fd": descriptor,
+            "identity": identity(info),
+            "published": False,
+        }
+        temporaries.append(temporary)
+    source_flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        source_flags |= os.O_NOFOLLOW
+    source_fd = os.open(record["candidate"], source_flags)
+    try:
+        source_info = os.fstat(source_fd)
+        if not stat.S_ISREG(source_info.st_mode):
+            raise TransactionFailure()
+        while True:
+            chunk = os.read(source_fd, 65536)
+            if not chunk:
+                break
+            offset = 0
+            while offset < len(chunk):
+                offset += os.write(descriptor, chunk[offset:])
+        os.fchmod(descriptor, record["mode"])
+        final_info = os.fstat(descriptor)
+        if identity(final_info) != temporary["identity"] or final_info.st_nlink != 1:
+            raise TransactionFailure()
+    finally:
+        os.close(source_fd)
+    return temporary
+
+
+def publish(record, parent_fd, temporary):
+    relative = record["relative"]
+    name = record["components"][-1]
+    test_boundary("project-before-publish", relative)
+    verify_parent_reachable(record["components"], parent_fd)
+    validate_target(record, parent_fd)
+    current_temp = lstat_at(parent_fd, temporary["name"])
+    if identity(current_temp) != temporary["identity"] or current_temp.st_nlink != 1:
+        raise TransactionFailure()
+    with blocked_mutation():
+        os.replace(
+            temporary["name"],
+            name,
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+        )
+        publication = {
+            "parent_fd": parent_fd,
+            "name": name,
+            "installed_identity": temporary["identity"],
+            "existed": record["existed"],
+            "original": record["original"],
+            "mode": record["mode"],
+            "relative": relative,
+        }
+        published.append(publication)
+        temporary["published"] = True
+        test_boundary("project-published", relative, True)
+        installed = lstat_at(parent_fd, name)
+        if (
+            not stat.S_ISREG(installed.st_mode)
+            or identity(installed) != temporary["identity"]
+            or installed.st_nlink != 1
+        ):
+            raise TransactionFailure()
+    test_boundary("project-after-publish", relative)
+    test_boundary("project-write", relative)
+
+
+def copy_to_descriptor(source_path, destination_fd):
+    with open(source_path, "rb") as source:
+        while True:
+            chunk = source.read(65536)
+            if not chunk:
+                return
+            offset = 0
+            while offset < len(chunk):
+                offset += os.write(destination_fd, chunk[offset:])
+
+
+def rollback():
+    global rollback_started
+    rollback_started = True
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, signals)
+    try:
+        for index, publication in enumerate(reversed(published), 1):
+            parent_fd = publication["parent_fd"]
+            name = publication["name"]
+            try:
+                current = lstat_at(parent_fd, name)
+            except FileNotFoundError:
+                continue
+            if identity(current) != publication["installed_identity"]:
+                continue
+            if publication["existed"]:
+                recovery = ".fprs-project-restore.%s.%08d" % (
+                    os.path.basename(stage), index)
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                if hasattr(os, "O_NOFOLLOW"):
+                    flags |= os.O_NOFOLLOW
+                recovery_fd = None
+                try:
+                    recovery_fd = os.open(recovery, flags, 0o600, dir_fd=parent_fd)
+                    copy_to_descriptor(publication["original"], recovery_fd)
+                    os.fchmod(recovery_fd, publication["mode"])
+                    os.close(recovery_fd)
+                    recovery_fd = None
+                    os.replace(recovery, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                except BaseException:
+                    if recovery_fd is not None:
+                        os.close(recovery_fd)
+                    try:
+                        os.unlink(recovery, dir_fd=parent_fd)
+                    except OSError:
+                        pass
+            else:
+                try:
+                    os.unlink(name, dir_fd=parent_fd)
+                except OSError:
+                    pass
+        for temporary in reversed(temporaries):
+            if temporary["published"]:
+                continue
+            try:
+                current = lstat_at(temporary["parent_fd"], temporary["name"])
+                if identity(current) == temporary["identity"]:
+                    os.unlink(temporary["name"], dir_fd=temporary["parent_fd"])
+            except OSError:
+                pass
+        for created in reversed(created_directories):
+            try:
+                current = lstat_at(created["parent_fd"], created["name"])
+                if stat.S_ISDIR(current.st_mode) and identity(current) == created["identity"]:
+                    os.rmdir(created["name"], dir_fd=created["parent_fd"])
+            except OSError:
+                pass
+    finally:
+        for caught_signal in signals:
+            signal.signal(caught_signal, signal.SIG_IGN)
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
+def close_descriptors():
+    for temporary in temporaries:
+        try:
+            os.close(temporary["fd"])
+        except OSError:
+            pass
+    for descriptor in reversed(all_directory_fds):
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+try:
+    if test_mode and control_dir and not hook_all:
+        os.setpgrp()
+    count = int(count_text)
+    fail_after = int(fail_after_text) if fail_after_text else 0
+    if count < 0 or fail_after < 0:
+        raise TransactionFailure()
+    root_values = read_lines(os.path.join(stage, "root-identity"), 2)
+    root_identity = (int(root_values[0]), int(root_values[1]))
+    root_fd, root_info = open_directory(root_path)
+    if identity(root_info) != root_identity:
+        raise TransactionFailure()
+    verify_root_path()
+    directory_fds[()] = root_fd
+    records = []
+    for index in range(1, count + 1):
+        record_dir = os.path.join(stage, "records", "%08d" % index)
+        relative = read_one(os.path.join(record_dir, "relative"))
+        components = safe_components(relative)
+        existed_text = read_one(os.path.join(record_dir, "existed"))
+        if existed_text not in ("yes", "no"):
+            raise TransactionFailure()
+        mode_text = read_one(os.path.join(record_dir, "mode"))
+        if any(character not in "01234567" for character in mode_text):
+            raise TransactionFailure()
+        candidate = os.path.join(record_dir, "candidate")
+        candidate_info = os.stat(candidate, follow_symlinks=False)
+        if not stat.S_ISREG(candidate_info.st_mode):
+            raise TransactionFailure()
+        record = {
+            "relative": relative,
+            "components": components,
+            "candidate": candidate,
+            "mode": int(mode_text, 8),
+            "existed": existed_text == "yes",
+            "original": os.path.join(record_dir, "original"),
+            "target_identity": None,
+        }
+        if record["existed"]:
+            target_values = read_lines(os.path.join(record_dir, "target-identity"), 2)
+            record["target_identity"] = (int(target_values[0]), int(target_values[1]))
+            original_info = os.stat(record["original"], follow_symlinks=False)
+            if not stat.S_ISREG(original_info.st_mode):
+                raise TransactionFailure()
+        records.append(record)
+    for index, record in enumerate(records, 1):
+        verify_root_path()
+        test_boundary("project-before-target-validation", record["relative"])
+        parent_fd = parent_for(record["components"], record["relative"])
+        validate_target(record, parent_fd)
+        temporary = make_temp(record, parent_fd, index)
+        publish(record, parent_fd, temporary)
+        if fail_after and index == fail_after:
+            raise TransactionFailure()
+except BaseException:
+    try:
+        rollback()
+    finally:
+        close_descriptors()
+    raise SystemExit(3)
+else:
+    close_descriptors()
+    raise SystemExit(0)
+' "$@"
+}
+
 
 fprs_project_transaction_commit() {
   [ "$FPRS_PROJECT_TRANSACTION_ACTIVE" -eq 1 ] || {
     fprs_project_transaction_error 'commit requires an active transaction'
     return 2
   }
-  if [ "$FPRS_PROJECT_TRANSACTION_VALIDATED" -ne 1 ]; then
-    fprs_project_transaction_validate || return $?
-  else
-    # Revalidate the snapshot immediately before the first project write.
-    fprs_project_transaction_validate || return $?
+  if ! fprs_project_transaction_validate; then
+    fprs_project_transaction_error 'project snapshot changed before publication'
+    fprs_project_transaction_cleanup >/dev/null 2>&1 || true
+    return 3
   fi
   command -v python3 >/dev/null 2>&1 || {
-    fprs_project_transaction_error 'Python 3 is required for race-safe publication'
-    return 1
+    fprs_project_transaction_error 'transaction runtime is unavailable'
+    fprs_project_transaction_cleanup >/dev/null 2>&1 || true
+    return 3
   }
 
-  local fprs_transaction_index fprs_transaction_record
-  local fprs_transaction_target fprs_transaction_mode fprs_transaction_relative
-  local fprs_transaction_parent fprs_transaction_existed
-  local fprs_transaction_fail_after
+  local fprs_transaction_fail_after fprs_transaction_test_mode
+  local fprs_transaction_signal_at fprs_transaction_control_dir
+  local fprs_transaction_pause_at fprs_transaction_pause_relative
+  local fprs_transaction_hook_all fprs_transaction_hook_pid
+  local fprs_transaction_hook_sequence fprs_transaction_hook_event
+  local fprs_transaction_hook_boundary fprs_transaction_hook_relative
+  local fprs_transaction_hook_status fprs_transaction_status
   fprs_transaction_fail_after=
+  fprs_transaction_test_mode=0
+  fprs_transaction_signal_at=
+  fprs_transaction_control_dir=
+  fprs_transaction_pause_at=
+  fprs_transaction_pause_relative=
+  fprs_transaction_hook_all=0
+  fprs_transaction_hook_pid=
   if [ "${FPRS_TEST_MODE-}" = 1 ]; then
+    fprs_transaction_test_mode=1
     fprs_transaction_fail_after=${FPRS_TEST_FAIL_PROJECT_WRITE_AFTER-}
     case "$fprs_transaction_fail_after" in
       ''|*[!0-9]*) fprs_transaction_fail_after= ;;
     esac
+    fprs_transaction_signal_at=${FPRS_TEST_SIGNAL_AT-}
+    fprs_transaction_control_dir=${FPRS_TEST_CONTROL_DIR-}
+    fprs_transaction_pause_at=${FPRS_TEST_PAUSE_AT-}
+    fprs_transaction_pause_relative=${FPRS_TEST_PAUSE_RELATIVE-}
+    if type fprs_project_transaction_test_hook >/dev/null 2>&1; then
+      fprs_transaction_control_dir="$FPRS_PROJECT_TRANSACTION_STAGE/test-control"
+      mkdir "$fprs_transaction_control_dir" 2>/dev/null || {
+        fprs_project_transaction_cleanup >/dev/null 2>&1 || true
+        return 3
+      }
+      chmod 700 "$fprs_transaction_control_dir" 2>/dev/null || {
+        fprs_project_transaction_cleanup >/dev/null 2>&1 || true
+        return 3
+      }
+      fprs_transaction_hook_all=1
+      (
+        fprs_transaction_hook_sequence=1
+        while [ ! -e "$fprs_transaction_control_dir/done" ]
+        do
+          fprs_transaction_hook_event="$fprs_transaction_control_dir/event.$(printf '%08d' "$fprs_transaction_hook_sequence")"
+          if [ -s "$fprs_transaction_hook_event" ]; then
+            fprs_transaction_hook_boundary=$(sed -n '2p' "$fprs_transaction_hook_event")
+            fprs_transaction_hook_relative=$(sed -n '3p' "$fprs_transaction_hook_event")
+            if fprs_project_transaction_test_hook \
+              "$fprs_transaction_hook_boundary" "$fprs_transaction_hook_relative"
+            then
+              fprs_transaction_hook_status=0
+            else
+              fprs_transaction_hook_status=1
+            fi
+            printf '%s\n' "$fprs_transaction_hook_status" > \
+              "$fprs_transaction_control_dir/ack.$(printf '%08d' "$fprs_transaction_hook_sequence").new" || exit 1
+            mv "$fprs_transaction_control_dir/ack.$(printf '%08d' "$fprs_transaction_hook_sequence").new" \
+              "$fprs_transaction_control_dir/ack.$(printf '%08d' "$fprs_transaction_hook_sequence")" || exit 1
+            fprs_transaction_hook_sequence=$((fprs_transaction_hook_sequence + 1))
+          else
+            sleep 0.01
+          fi
+        done
+      ) &
+      fprs_transaction_hook_pid=$!
+    fi
   fi
 
-  if ! fprs_project_transaction_pin_root; then
-    fprs_project_transaction_error 'project root identity changed before publication'
-    fprs_project_transaction_rollback || true
-    fprs_project_transaction_cleanup || true
-    return 3
+  fprs_project_transaction_run_python \
+    "$FPRS_PROJECT_TRANSACTION_ROOT" "$FPRS_PROJECT_TRANSACTION_STAGE" \
+    "$FPRS_PROJECT_TRANSACTION_COUNT" "$fprs_transaction_fail_after" \
+    "$fprs_transaction_test_mode" "$fprs_transaction_signal_at" \
+    "$fprs_transaction_control_dir" "$fprs_transaction_pause_at" \
+    "$fprs_transaction_pause_relative" "$fprs_transaction_hook_all" \
+    >/dev/null 2>&1
+  fprs_transaction_status=$?
+  if [ -n "$fprs_transaction_hook_pid" ]; then
+    : > "$fprs_transaction_control_dir/done"
+    wait "$fprs_transaction_hook_pid" 2>/dev/null || true
   fi
-
-  fprs_transaction_index=1
-  while [ "$fprs_transaction_index" -le "$FPRS_PROJECT_TRANSACTION_COUNT" ]
-  do
-    fprs_transaction_record=$(
-      fprs_project_transaction_record_dir "$fprs_transaction_index"
-    )
-    fprs_transaction_relative=$(cat "$fprs_transaction_record/relative") || break
-    if ! fprs_project_transaction_ensure_parent "$fprs_transaction_relative"; then
-      break
-    fi
-    fprs_transaction_target=$(cat "$fprs_transaction_record/target") || break
-    fprs_transaction_target=$(
-      fprs_project_transaction_target_path "$fprs_transaction_relative"
-    ) || break
-    fprs_transaction_mode=$(cat "$fprs_transaction_record/mode") || break
-    fprs_transaction_existed=$(cat "$fprs_transaction_record/existed") || break
-    fprs_transaction_parent=${fprs_transaction_target%/*}
-    if ! exec 9< "$fprs_transaction_parent"; then
-      break
-    fi
-    FPRS_PROJECT_TRANSACTION_FD_OPEN=1
-    FPRS_PROJECT_TRANSACTION_CURRENT_RECORD=$fprs_transaction_record
-    fprs_project_transaction_boundary project-before-target-validation \
-      "$fprs_transaction_relative" || break
-    if ! fprs_project_transaction_validate_record "$fprs_transaction_index"; then
-      break
-    fi
-    if ! fprs_project_transaction_prepare_temp "$fprs_transaction_record" \
-      "$FPRS_PROJECT_TRANSACTION_ROOT" "$fprs_transaction_relative" \
-      "$fprs_transaction_record/candidate" "$fprs_transaction_mode" \
-      "$fprs_transaction_existed" "$fprs_transaction_record/original"
-    then
-      break
-    fi
-    fprs_project_transaction_boundary project-temp-created \
-      "$fprs_transaction_relative" || break
-    fprs_project_transaction_boundary project-before-publish \
-      "$fprs_transaction_relative" || break
-    if ! fprs_project_transaction_publish_temp "$fprs_transaction_record" \
-      "$FPRS_PROJECT_TRANSACTION_ROOT" "$fprs_transaction_relative" \
-      "$fprs_transaction_record/candidate" "$fprs_transaction_mode" \
-      "$fprs_transaction_existed" "$fprs_transaction_record/original"
-    then
-      break
-    fi
-    FPRS_PROJECT_TRANSACTION_APPLIED=$fprs_transaction_index
-    fprs_project_transaction_boundary project-published \
-      "$fprs_transaction_relative" || break
-    fprs_project_transaction_boundary project-write \
-      "$fprs_transaction_relative" || break
-    if [ -n "$fprs_transaction_fail_after" ] &&
-      [ "$fprs_transaction_index" -eq "$fprs_transaction_fail_after" ]
-    then
-      fprs_project_transaction_error \
-        "injected failure after project write $fprs_transaction_index"
-      break
-    fi
-    exec 9<&-
-    FPRS_PROJECT_TRANSACTION_FD_OPEN=0
-    FPRS_PROJECT_TRANSACTION_CURRENT_RECORD=
-    fprs_transaction_index=$((fprs_transaction_index + 1))
-  done
-
-  if [ "$FPRS_PROJECT_TRANSACTION_APPLIED" -ne "$FPRS_PROJECT_TRANSACTION_COUNT" ] ||
-    { [ -n "$fprs_transaction_fail_after" ] &&
-      [ "$FPRS_PROJECT_TRANSACTION_APPLIED" -eq "$fprs_transaction_fail_after" ]; }
-  then
+  if [ "$fprs_transaction_status" -ne 0 ]; then
     fprs_project_transaction_error 'project write failed; rollback attempted'
-    fprs_project_transaction_rollback || true
-    fprs_project_transaction_cleanup || true
+    fprs_project_transaction_cleanup >/dev/null 2>&1 || true
     return 3
   fi
-
   if ! fprs_project_transaction_cleanup; then
     fprs_project_transaction_error 'project writes completed but private cleanup failed'
     return 1

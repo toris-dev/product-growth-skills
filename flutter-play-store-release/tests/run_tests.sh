@@ -3081,6 +3081,192 @@ SH
     fi
   done
 
+  transaction_control_helper="$TMP_ROOT/project transaction/control-helper.sh"
+  cat > "$transaction_control_helper" <<'SH'
+#!/usr/bin/env bash
+set -u
+. "$1"
+root=$2
+shift 2
+fprs_project_transaction_begin "$root" || exit $?
+while [ "$#" -gt 0 ]
+do
+  [ "$#" -ge 2 ] || exit 97
+  fprs_project_transaction_register "$1" "$2" || exit $?
+  shift 2
+done
+fprs_project_transaction_validate || exit $?
+fprs_project_transaction_commit
+SH
+  chmod 700 "$transaction_control_helper"
+  transaction_wait_for_control_event() {
+    transaction_wait_pid=$1
+    transaction_wait_file=$2
+    transaction_wait_description=$3
+    transaction_wait_attempt=0
+    while [ "$transaction_wait_attempt" -lt 500 ]
+    do
+      [ -s "$transaction_wait_file" ] && return 0
+      kill -0 "$transaction_wait_pid" 2>/dev/null || break
+      sleep 0.01
+      transaction_wait_attempt=$((transaction_wait_attempt + 1))
+    done
+    kill "$transaction_wait_pid" 2>/dev/null || true
+    wait "$transaction_wait_pid" 2>/dev/null || true
+    fail "$transaction_wait_description"
+  }
+
+  case "${FPRS_REVIEW_CASE-all}" in
+    all|signal-windows)
+      for transaction_boundary in \
+        project-dir-created project-temp-created project-published
+      do
+        transaction_control_root="$TMP_ROOT/project transaction/group signal $transaction_boundary"
+        transaction_control_dir="$TMP_ROOT/project transaction/group control $transaction_boundary"
+        mkdir -p "$transaction_control_root" "$transaction_control_dir"
+        printf 'group original\r\n' > "$transaction_control_root/existing.txt"
+        chmod 640 "$transaction_control_root/existing.txt"
+        cp "$transaction_control_root/existing.txt" "$TMP_ROOT/group-signal.expected"
+        case "$transaction_boundary" in
+          project-dir-created) transaction_control_relative='nested/path/created.txt' ;;
+          *) transaction_control_relative='existing.txt' ;;
+        esac
+        env FPRS_TEST_MODE=1 \
+          FPRS_TEST_CONTROL_DIR="$transaction_control_dir" \
+          FPRS_TEST_PAUSE_AT="$transaction_boundary" \
+          /bin/bash "$transaction_control_helper" "$TRANSACTION_LIBRARY" \
+          "$transaction_control_root" "$transaction_control_relative" \
+          "$TMP_ROOT/signal.candidate" > "$transaction_control_dir/stdout" \
+          2> "$transaction_control_dir/stderr" &
+        transaction_control_pid=$!
+        transaction_wait_for_control_event "$transaction_control_pid" \
+          "$transaction_control_dir/event" \
+          "single-process transaction did not expose blocked signal window: $transaction_boundary"
+        transaction_control_pgid=$(sed -n '1p' "$transaction_control_dir/event")
+        case "$transaction_control_pgid" in ''|*[!0-9]*)
+          fail "transaction control event omitted a process group: $transaction_boundary" ;;
+        esac
+        kill -TERM -- "-$transaction_control_pgid" 2>/dev/null ||
+          fail "could not deliver process-group signal: $transaction_boundary"
+        if wait "$transaction_control_pid"; then
+          fail "process-group signal unexpectedly succeeded: $transaction_boundary"
+        else
+          transaction_status=$?
+        fi
+        [ "$transaction_status" -eq 3 ] ||
+          fail "process-group signal did not return 3: $transaction_boundary"
+        assert_same_file "$TMP_ROOT/group-signal.expected" \
+          "$transaction_control_root/existing.txt" \
+          "process-group signal changed original bytes: $transaction_boundary"
+        assert_mode 640 "$transaction_control_root/existing.txt" \
+          "process-group signal changed original mode: $transaction_boundary"
+        [ ! -e "$transaction_control_root/nested" ] ||
+          fail "process-group signal left a created directory: $transaction_boundary"
+        if find "$transaction_control_root" -name '.fprs-project-write.*' -print |
+          grep . >/dev/null 2>&1
+        then
+          fail "process-group signal left a temporary file: $transaction_boundary"
+        fi
+      done
+      ;;
+  esac
+
+  case "${FPRS_REVIEW_CASE-all}" in
+    all|ancestor-rollback)
+      transaction_descriptor_root="$TMP_ROOT/project transaction/descriptor rollback"
+      transaction_descriptor_outside="$TMP_ROOT/project transaction/descriptor outside"
+      transaction_descriptor_control="$TMP_ROOT/project transaction/descriptor control"
+      mkdir -p "$transaction_descriptor_root/outer/safe" \
+        "$transaction_descriptor_outside/safe" "$transaction_descriptor_control"
+      printf 'descriptor original\r\n' > \
+        "$transaction_descriptor_root/outer/safe/first.txt"
+      chmod 640 "$transaction_descriptor_root/outer/safe/first.txt"
+      cp "$transaction_descriptor_root/outer/safe/first.txt" \
+        "$TMP_ROOT/descriptor-original.expected"
+      printf 'descriptor replacement\n' > "$TMP_ROOT/descriptor-first.candidate"
+      printf 'pause original\n' > "$transaction_descriptor_root/pause.txt"
+      printf 'pause replacement\n' > "$TMP_ROOT/descriptor-pause.candidate"
+      env FPRS_TEST_MODE=1 \
+        FPRS_TEST_CONTROL_DIR="$transaction_descriptor_control" \
+        FPRS_TEST_PAUSE_AT=project-before-target-validation \
+        FPRS_TEST_PAUSE_RELATIVE=pause.txt \
+        /bin/bash "$transaction_control_helper" "$TRANSACTION_LIBRARY" \
+        "$transaction_descriptor_root" \
+        outer/safe/first.txt "$TMP_ROOT/descriptor-first.candidate" \
+        pause.txt "$TMP_ROOT/descriptor-pause.candidate" \
+        > "$transaction_descriptor_control/stdout" \
+        2> "$transaction_descriptor_control/stderr" &
+      transaction_control_pid=$!
+      transaction_wait_for_control_event "$transaction_control_pid" \
+        "$transaction_descriptor_control/event" \
+        'transaction did not pause after publishing before ancestor-swap rollback'
+      transaction_control_pgid=$(sed -n '1p' "$transaction_descriptor_control/event")
+      mv "$transaction_descriptor_root/outer" \
+        "$transaction_descriptor_root/outer-pinned"
+      ln -s "$transaction_descriptor_outside" "$transaction_descriptor_root/outer"
+      kill -TERM -- "-$transaction_control_pgid" 2>/dev/null ||
+        fail 'could not signal descriptor rollback transaction'
+      if wait "$transaction_control_pid"; then
+        fail 'descriptor rollback signal unexpectedly succeeded'
+      else
+        transaction_status=$?
+      fi
+      [ "$transaction_status" -eq 3 ] ||
+        fail 'descriptor rollback signal did not return status 3'
+      assert_same_file "$TMP_ROOT/descriptor-original.expected" \
+        "$transaction_descriptor_root/outer-pinned/safe/first.txt" \
+        'ancestor swap redirected or prevented descriptor-relative rollback'
+      [ ! -e "$transaction_descriptor_outside/safe/first.txt" ] ||
+        fail 'ancestor swap redirected rollback outside the project root'
+      rm "$transaction_descriptor_root/outer"
+      mv "$transaction_descriptor_root/outer-pinned" \
+        "$transaction_descriptor_root/outer"
+      ;;
+  esac
+
+  case "${FPRS_REVIEW_CASE-all}" in
+    all|created-replacement)
+      transaction_replacement_root="$TMP_ROOT/project transaction/created replacement"
+      transaction_replacement_control="$TMP_ROOT/project transaction/replacement control"
+      mkdir -p "$transaction_replacement_root" "$transaction_replacement_control"
+      printf 'identical created bytes\n' > "$TMP_ROOT/replacement-created.candidate"
+      env FPRS_TEST_MODE=1 \
+        FPRS_TEST_CONTROL_DIR="$transaction_replacement_control" \
+        FPRS_TEST_PAUSE_AT=project-after-publish \
+        FPRS_TEST_PAUSE_RELATIVE=created.txt \
+        /bin/bash "$transaction_control_helper" "$TRANSACTION_LIBRARY" \
+        "$transaction_replacement_root" created.txt \
+        "$TMP_ROOT/replacement-created.candidate" \
+        > "$transaction_replacement_control/stdout" \
+        2> "$transaction_replacement_control/stderr" &
+      transaction_control_pid=$!
+      transaction_wait_for_control_event "$transaction_control_pid" \
+        "$transaction_replacement_control/event" \
+        'transaction did not pause after publishing a created target'
+      transaction_control_pgid=$(sed -n '1p' "$transaction_replacement_control/event")
+      cp "$TMP_ROOT/replacement-created.candidate" \
+        "$transaction_replacement_root/user-replacement"
+      chmod 644 "$transaction_replacement_root/user-replacement"
+      ln "$transaction_replacement_root/user-replacement" \
+        "$transaction_replacement_root/user-proof"
+      mv -f "$transaction_replacement_root/user-replacement" \
+        "$transaction_replacement_root/created.txt"
+      kill -TERM -- "-$transaction_control_pgid" 2>/dev/null ||
+        fail 'could not signal created-target replacement transaction'
+      if wait "$transaction_control_pid"; then
+        fail 'created-target replacement signal unexpectedly succeeded'
+      else
+        transaction_status=$?
+      fi
+      [ "$transaction_status" -eq 3 ] ||
+        fail 'created-target replacement signal did not return status 3'
+      [ -f "$transaction_replacement_root/created.txt" ] &&
+        [ "$transaction_replacement_root/created.txt" -ef \
+          "$transaction_replacement_root/user-proof" ] ||
+        fail 'rollback removed a user replacement with candidate-identical bytes'
+      ;;
+  esac
+
   if grep -E 'git[[:space:]]+(checkout|restore|reset)' \
     "$TRANSACTION_LIBRARY" >/dev/null 2>&1
   then
@@ -3133,6 +3319,60 @@ GRADLE
   fi
   [ "$(cat "$GRADLE_ROOT/existing-output.gradle")" = 'unrelated candidate owner' ] ||
     fail 'Gradle planner changed an unsafe pre-existing output'
+
+  case "${FPRS_GRADLE_REVIEW_CASE-all}" in
+    all|late-output-alias)
+      gradle_publish_helper="$GRADLE_ROOT/publish-helper.sh"
+      cat > "$gradle_publish_helper" <<'SH'
+#!/usr/bin/env bash
+set -u
+. "$1"
+fprs_gradle_signing_candidate "$2" "$3" "$4"
+SH
+      chmod 700 "$gradle_publish_helper"
+      for gradle_late_alias_type in symlink hardlink
+      do
+        gradle_late_control="$GRADLE_ROOT/late-$gradle_late_alias_type-control"
+        gradle_late_output="$GRADLE_ROOT/late-$gradle_late_alias_type.gradle"
+        mkdir -p "$gradle_late_control"
+        env FPRS_TEST_MODE=1 \
+          FPRS_TEST_GRADLE_CONTROL_DIR="$gradle_late_control" \
+          /bin/bash "$gradle_publish_helper" "$GRADLE_LIBRARY" groovy \
+          "$GRADLE_SOURCE" "$gradle_late_output" \
+          > "$gradle_late_control/stdout" 2> "$gradle_late_control/stderr" &
+        gradle_late_pid=$!
+        gradle_late_attempt=0
+        while [ "$gradle_late_attempt" -lt 500 ]
+        do
+          [ -s "$gradle_late_control/before-publish" ] && break
+          kill -0 "$gradle_late_pid" 2>/dev/null || break
+          sleep 0.01
+          gradle_late_attempt=$((gradle_late_attempt + 1))
+        done
+        if [ ! -s "$gradle_late_control/before-publish" ]; then
+          kill "$gradle_late_pid" 2>/dev/null || true
+          wait "$gradle_late_pid" 2>/dev/null || true
+          fail "Gradle planner did not expose exclusive late-$gradle_late_alias_type publication boundary"
+        fi
+        case "$gradle_late_alias_type" in
+          symlink) ln -s "$GRADLE_SOURCE" "$gradle_late_output" ;;
+          hardlink) ln "$GRADLE_SOURCE" "$gradle_late_output" ;;
+        esac
+        : > "$gradle_late_control/continue"
+        if wait "$gradle_late_pid"; then
+          fail "Gradle planner followed a late $gradle_late_alias_type output alias"
+        else
+          gradle_status=$?
+        fi
+        [ "$gradle_status" -eq 2 ] ||
+          fail "late $gradle_late_alias_type output alias did not return status 2"
+        assert_same_file "$GRADLE_ROOT/alias-source.expected" "$GRADLE_SOURCE" \
+          "late $gradle_late_alias_type output alias mutated the source"
+        rm "$gradle_late_output"
+      done
+      ;;
+  esac
+
   fprs_gradle_signing_candidate groovy "$GRADLE_SOURCE" \
     "$GRADLE_CANDIDATE" || fail 'Groovy Gradle candidate generation failed'
   grep -F 'BEGIN flutter-play-store-release schema=1' \
@@ -3157,11 +3397,18 @@ GRADLE
     [ "$gradle_assignment_count" -eq 1 ] ||
       fail "$gradle_property was not connected exactly once in Groovy"
   done
-  grep -F 'providers.environmentVariable("ANDROID_KEY_PROPERTIES_PATH").orNull' \
+  grep -F 'fprsPropertiesEnvironment = "ANDROID_KEY_PROPERTIES_PATH"' \
     "$GRADLE_CANDIDATE" >/dev/null 2>&1 ||
     fail 'Groovy block omitted the key-properties override'
-  grep -F 'rootProject.file("key.properties")' "$GRADLE_CANDIDATE" >/dev/null 2>&1 ||
+  grep -F 'providers.environmentVariable(fprsPropertiesEnvironment).orNull' \
+    "$GRADLE_CANDIDATE" >/dev/null 2>&1 ||
+    fail 'Groovy block does not use its emitted override contract'
+  grep -F 'fprsPropertiesFallback = "key.properties"' \
+    "$GRADLE_CANDIDATE" >/dev/null 2>&1 ||
     fail 'Groovy block omitted the android/key.properties fallback'
+  grep -F 'rootProject.file(fprsPropertiesFallback)' \
+    "$GRADLE_CANDIDATE" >/dev/null 2>&1 ||
+    fail 'Groovy block does not use its emitted fallback contract'
   grep -F 'gradle.startParameter.taskNames.any' "$GRADLE_CANDIDATE" >/dev/null 2>&1 ||
     fail 'Groovy block does not inspect directly requested tasks'
   gradle_guard_line=$(grep -n 'if (fprsReleaseSigningTaskRequested)' \
@@ -3225,6 +3472,111 @@ KOTLIN
     "$GRADLE_ROOT/kotlin.second" release || fail 'second Kotlin generation failed'
   assert_same_file "$gradle_kotlin_candidate" "$GRADLE_ROOT/kotlin.second" \
     'second Kotlin generation changed the candidate'
+
+  case "${FPRS_GRADLE_REVIEW_CASE-all}" in
+    all|emitted-guard)
+      type fprs_gradle_signing_extract_emitted_contract >/dev/null 2>&1 ||
+        fail 'missing emitted Gradle guard contract extractor'
+      type fprs_gradle_signing_contract_task_requires_credentials >/dev/null 2>&1 ||
+        fail 'missing emitted-contract task evaluator'
+      type fprs_gradle_signing_contract_properties_path >/dev/null 2>&1 ||
+        fail 'missing emitted-contract properties path evaluator'
+      type fprs_gradle_signing_contract_guard_check >/dev/null 2>&1 ||
+        fail 'missing emitted-contract credential evaluator'
+      gradle_groovy_contract="$GRADLE_ROOT/groovy.contract"
+      gradle_kotlin_contract="$GRADLE_ROOT/kotlin.contract"
+      fprs_gradle_signing_extract_emitted_contract "$GRADLE_CANDIDATE" \
+        "$gradle_groovy_contract" || fail 'could not extract Groovy emitted guard contract'
+      fprs_gradle_signing_extract_emitted_contract "$gradle_kotlin_candidate" \
+        "$gradle_kotlin_contract" || fail 'could not extract Kotlin emitted guard contract'
+      assert_same_file "$gradle_groovy_contract" "$gradle_kotlin_contract" \
+        'Groovy and Kotlin emitted different signing guard contracts'
+      for gradle_contract_key in \
+        terminal_task_prefixes containing_task_prefixes release_token \
+        property_keys properties_environment properties_fallback
+      do
+        gradle_contract_value=$(sed -n \
+          "s/^$gradle_contract_key=//p" "$gradle_groovy_contract")
+        [ -n "$gradle_contract_value" ] ||
+          fail "emitted signing contract omitted $gradle_contract_key"
+      done
+      for gradle_nonrelease_task in \
+        help tasks properties assembleDebug bundleQaDebug testDebugUnitTest lintRelease
+      do
+        if fprs_gradle_signing_contract_task_requires_credentials \
+          "$gradle_groovy_contract" "$gradle_nonrelease_task"
+        then
+          fail "emitted contract required credentials for $gradle_nonrelease_task"
+        fi
+      done
+      for gradle_release_task in \
+        :app:bundleRelease assembleProdRelease publishReleaseBundle
+      do
+        fprs_gradle_signing_contract_task_requires_credentials \
+          "$gradle_groovy_contract" "$gradle_release_task" ||
+          fail "emitted contract bypassed credentials for $gradle_release_task"
+      done
+      gradle_contract_root="$GRADLE_ROOT/emitted contract/android"
+      mkdir -p "$gradle_contract_root/app"
+      gradle_contract_fallback=$(
+        unset ANDROID_KEY_PROPERTIES_PATH
+        fprs_gradle_signing_contract_properties_path \
+          "$gradle_groovy_contract" "$gradle_contract_root"
+      ) || fail 'emitted contract fallback path selection failed'
+      [ "$gradle_contract_fallback" = "$gradle_contract_root/key.properties" ] ||
+        fail 'emitted contract selected the wrong fallback properties path'
+      gradle_contract_environment=$(sed -n \
+        's/^properties_environment=//p' "$gradle_groovy_contract")
+      gradle_contract_override="$GRADLE_ROOT/emitted-override.properties"
+      gradle_contract_selected=$(env \
+        "$gradle_contract_environment=$gradle_contract_override" \
+        /bin/bash -c '. "$1"; fprs_gradle_signing_contract_properties_path "$2" "$3"' \
+        _ "$GRADLE_LIBRARY" "$gradle_groovy_contract" "$gradle_contract_root") ||
+        fail 'emitted contract override path selection failed'
+      [ "$gradle_contract_selected" = "$gradle_contract_override" ] ||
+        fail 'emitted contract did not select its override environment path'
+      if fprs_gradle_signing_contract_guard_check "$gradle_groovy_contract" \
+        assembleDebug "$gradle_contract_root" \
+        > "$GRADLE_ROOT/emitted-debug.stdout" \
+        2> "$GRADLE_ROOT/emitted-debug.stderr"
+      then
+        :
+      else
+        fail 'emitted contract required credentials for a debug task'
+      fi
+      if fprs_gradle_signing_contract_guard_check "$gradle_groovy_contract" \
+        bundleRelease "$gradle_contract_root" \
+        > "$GRADLE_ROOT/emitted-release.stdout" \
+        2> "$GRADLE_ROOT/emitted-release.stderr"
+      then
+        fail 'emitted contract accepted missing release credentials'
+      fi
+      printf 'emitted keystore bytes\n' > "$gradle_contract_root/app/upload.jks"
+      cat > "$gradle_contract_root/key.properties" <<'PROPERTIES'
+storeFile=upload.jks
+storePassword=FPRS_EMITTED_STORE_PASSWORD_CANARY_72ae
+keyAlias=FPRS_EMITTED_ALIAS_CANARY_2c41
+keyPassword=FPRS_EMITTED_KEY_PASSWORD_CANARY_693b
+PROPERTIES
+      fprs_gradle_signing_contract_guard_check "$gradle_groovy_contract" \
+        publishReleaseBundle "$gradle_contract_root" \
+        > "$GRADLE_ROOT/emitted-valid.stdout" \
+        2> "$GRADLE_ROOT/emitted-valid.stderr" ||
+        fail 'emitted contract rejected complete fallback credentials'
+      cp "$gradle_contract_root/key.properties" "$gradle_contract_override"
+      env "$gradle_contract_environment=$gradle_contract_override" \
+        /bin/bash -c '. "$1"; fprs_gradle_signing_contract_guard_check "$2" assembleProdRelease "$3"' \
+        _ "$GRADLE_LIBRARY" "$gradle_groovy_contract" "$gradle_contract_root" \
+        > "$GRADLE_ROOT/emitted-override.stdout" \
+        2> "$GRADLE_ROOT/emitted-override.stderr" ||
+        fail 'emitted contract rejected complete override credentials'
+      if grep -R -E 'FPRS_EMITTED_(STORE_PASSWORD|ALIAS|KEY_PASSWORD)_CANARY' \
+        "$GRADLE_ROOT"/*.stdout "$GRADLE_ROOT"/*.stderr >/dev/null 2>&1
+      then
+        fail 'emitted signing contract leaked a credential value'
+      fi
+      ;;
+  esac
 
   gradle_crlf_source="$GRADLE_ROOT/crlf build.gradle"
   gradle_crlf_candidate="$GRADLE_ROOT/crlf candidate.gradle"
@@ -3341,6 +3693,87 @@ GRADLE
     fail 'marker/scope text inside comments or multiline strings caused a conflict'
   grep -F 'def documentation = """' "$GRADLE_ROOT/comment-string.candidate" \
     >/dev/null 2>&1 || fail 'Gradle planner did not preserve multiline user text'
+
+  case "${FPRS_GRADLE_REVIEW_CASE-all}" in
+    all|slashy-strings)
+      cat > "$gradle_conflict_source" <<'GRADLE'
+def slashyDocumentation = /
+android {
+    \/\/ BEGIN flutter-play-store-release schema=1
+    buildTypes { release { signingConfig signingConfigs.debug } }
+    \/\/ END flutter-play-store-release
+}
+/
+def dollarSlashyDocumentation = $/
+android {
+    // BEGIN flutter-play-store-release schema=1
+    buildTypes { release { signingConfig signingConfigs.debug } }
+    // END flutter-play-store-release
+}
+/$
+android {
+}
+GRADLE
+      fprs_gradle_signing_candidate groovy "$gradle_conflict_source" \
+        "$GRADLE_ROOT/slashy-string.candidate" ||
+        fail 'slashy or dollar-slashy documentation changed structural Gradle scanning'
+      grep -F 'def dollarSlashyDocumentation = $/' \
+        "$GRADLE_ROOT/slashy-string.candidate" >/dev/null 2>&1 ||
+        fail 'Gradle planner did not preserve dollar-slashy user text'
+      ;;
+  esac
+
+  case "${FPRS_GRADLE_REVIEW_CASE-all}" in
+    all|setter-signing)
+      gradle_setter_source="$GRADLE_ROOT/setter-signing.gradle"
+      cat > "$gradle_setter_source" <<'GRADLE'
+android {
+    signingConfigs {
+        upload {
+            storeFile file("user-owned.jks")
+        }
+    }
+    buildTypes {
+        release {
+            setSigningConfig(signingConfigs.upload)
+        }
+    }
+}
+GRADLE
+      fprs_gradle_signing_candidate groovy "$gradle_setter_source" \
+        "$GRADLE_ROOT/setter-signing.candidate" ||
+        fail 'declared setter-form user signing was rejected'
+      [ "$FPRS_GRADLE_SIGNING_CLASSIFICATION" = preserve ] ||
+        fail 'setter-form user signing was not classified as preserve'
+      assert_same_file "$gradle_setter_source" \
+        "$GRADLE_ROOT/setter-signing.candidate" \
+        'setter-form user signing was overwritten by an owned block'
+
+      gradle_setter_kotlin_source="$GRADLE_ROOT/setter-signing.gradle.kts"
+      cat > "$gradle_setter_kotlin_source" <<'KOTLIN'
+android {
+    signingConfigs {
+        create("upload") {
+            storeFile = file("user-owned.jks")
+        }
+    }
+    buildTypes {
+        getByName("release") {
+            setSigningConfig(signingConfigs.getByName("upload"))
+        }
+    }
+}
+KOTLIN
+      fprs_gradle_signing_candidate kotlin "$gradle_setter_kotlin_source" \
+        "$GRADLE_ROOT/setter-signing-kotlin.candidate" ||
+        fail 'declared Kotlin setter-form user signing was rejected'
+      [ "$FPRS_GRADLE_SIGNING_CLASSIFICATION" = preserve ] ||
+        fail 'Kotlin setter-form user signing was not classified as preserve'
+      assert_same_file "$gradle_setter_kotlin_source" \
+        "$GRADLE_ROOT/setter-signing-kotlin.candidate" \
+        'Kotlin setter-form user signing was overwritten by an owned block'
+      ;;
+  esac
 
   cat > "$gradle_conflict_source" <<'GRADLE'
 android {

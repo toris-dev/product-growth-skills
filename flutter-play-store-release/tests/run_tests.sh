@@ -977,16 +977,729 @@ secret_codecs() {
   pass 'secret_codecs'
 }
 
+inspection_assert_status() {
+  inspection_description=$1
+  inspection_expected_status=$2
+  shift 2
+  inspection_case_index=$((inspection_case_index + 1))
+  INSPECTION_LAST_STDOUT="$INSPECTION_LOGS/$inspection_case_index.stdout"
+  INSPECTION_LAST_STDERR="$INSPECTION_LOGS/$inspection_case_index.stderr"
+
+  if "$@" > "$INSPECTION_LAST_STDOUT" 2> "$INSPECTION_LAST_STDERR"; then
+    inspection_actual_status=0
+  else
+    inspection_actual_status=$?
+  fi
+  [ "$inspection_actual_status" -eq "$inspection_expected_status" ] ||
+    fail "$inspection_description (expected exit $inspection_expected_status, got $inspection_actual_status)"
+}
+
+inspection_assert_json_fragment() {
+  inspection_json_file=$1
+  inspection_expected_fragment=$2
+  inspection_description=$3
+  grep -F -- "$inspection_expected_fragment" "$inspection_json_file" >/dev/null 2>&1 ||
+    fail "$inspection_description"
+}
+
+inspection_assert_schema() {
+  inspection_json_file=$1
+  inspection_keys='schema_version project_root flutter_constraint dart_constraint flutter_version android_dsl gradle_file android_gradle_plugin_version gradle_wrapper_version java_compatibility application_id namespace application_id_candidates version_name version_code pubspec_version_name pubspec_build_number flavors selected_flavor suggested_flavor suggestion_confirmed entrypoints build_runner fastlane github_actions release_signing release_uses_debug_signing firebase firebase_package_names firebase_apps firebase_app_distribution monorepo git_dirty files_bootstrap_may_change warnings failures'
+
+  [ "$(sed -n '1p' "$inspection_json_file" | cut -c1)" = '{' ] ||
+    fail 'inspection JSON did not start with an object'
+  [ "$(tail -n 1 "$inspection_json_file" | sed 's/.*\(.\)$/\1/')" = '}' ] ||
+    fail 'inspection JSON did not end with an object'
+  for inspection_key in $inspection_keys
+  do
+    inspection_key_count=$(grep -o "\"$inspection_key\":" "$inspection_json_file" | wc -l | tr -d '[:space:]')
+    [ "$inspection_key_count" = 1 ] ||
+      fail "inspection JSON key count changed for $inspection_key"
+  done
+
+  # Keep structural checks even when a richer parser is available.
+  grep -E '"schema_version":[0-9]+' "$inspection_json_file" >/dev/null 2>&1 ||
+    fail 'inspection schema_version is not numeric'
+  grep -E '"suggestion_confirmed":(true|false)' "$inspection_json_file" >/dev/null 2>&1 ||
+    fail 'inspection suggestion_confirmed is not boolean'
+  grep -E '"git_dirty":(true|false|null)' "$inspection_json_file" >/dev/null 2>&1 ||
+    fail 'inspection git_dirty has the wrong structural type'
+  for inspection_array_key in application_id_candidates flavors entrypoints firebase_package_names firebase_apps files_bootstrap_may_change warnings failures
+  do
+    grep -E "\"$inspection_array_key\":\[" "$inspection_json_file" >/dev/null 2>&1 ||
+      fail "inspection $inspection_array_key is not structurally an array"
+  done
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$inspection_json_file" <<'PY' || fail 'Python rejected the inspection JSON schema'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+
+nullable_strings = {
+    "flutter_constraint", "dart_constraint", "flutter_version", "gradle_file",
+    "android_gradle_plugin_version", "gradle_wrapper_version", "java_compatibility",
+    "application_id", "namespace", "version_name", "version_code",
+    "pubspec_version_name", "pubspec_build_number", "selected_flavor", "suggested_flavor",
+}
+strings = {"project_root", "android_dsl"}
+booleans = {
+    "suggestion_confirmed", "build_runner", "fastlane", "github_actions",
+    "release_signing", "release_uses_debug_signing", "firebase",
+    "firebase_app_distribution", "monorepo",
+}
+arrays = {
+    "application_id_candidates", "flavors", "entrypoints", "firebase_package_names",
+    "firebase_apps", "files_bootstrap_may_change", "warnings", "failures",
+}
+required = {"schema_version", "git_dirty"} | nullable_strings | strings | booleans | arrays
+assert required <= set(data)
+assert type(data["schema_version"]) is int
+assert data["schema_version"] == 1
+for key in strings:
+    assert type(data[key]) is str
+for key in nullable_strings:
+    assert data[key] is None or type(data[key]) is str
+for key in booleans:
+    assert type(data[key]) is bool
+for key in arrays:
+    assert type(data[key]) is list
+assert data["git_dirty"] is None or type(data["git_dirty"]) is bool
+PY
+  elif command -v ruby >/dev/null 2>&1; then
+    ruby -rjson - "$inspection_json_file" <<'RUBY' || fail 'Ruby rejected the inspection JSON schema'
+data = JSON.parse(File.read(ARGV.fetch(0)))
+nullable_strings = %w[flutter_constraint dart_constraint flutter_version gradle_file android_gradle_plugin_version gradle_wrapper_version java_compatibility application_id namespace version_name version_code pubspec_version_name pubspec_build_number selected_flavor suggested_flavor]
+strings = %w[project_root android_dsl]
+booleans = %w[suggestion_confirmed build_runner fastlane github_actions release_signing release_uses_debug_signing firebase firebase_app_distribution monorepo]
+arrays = %w[application_id_candidates flavors entrypoints firebase_package_names firebase_apps files_bootstrap_may_change warnings failures]
+required = (["schema_version", "git_dirty"] + nullable_strings + strings + booleans + arrays).sort
+raise unless (required - data.keys).empty?
+raise unless data["schema_version"] == 1
+strings.each { |key| raise unless data[key].is_a?(String) }
+nullable_strings.each { |key| raise unless data[key].nil? || data[key].is_a?(String) }
+booleans.each { |key| raise unless data[key] == true || data[key] == false }
+arrays.each { |key| raise unless data[key].is_a?(Array) }
+raise unless data["git_dirty"].nil? || data["git_dirty"] == true || data["git_dirty"] == false
+RUBY
+  fi
+}
+
+inspection_write_pubspec() {
+  inspection_project=$1
+  inspection_build_runner_section=$2
+  mkdir -p "$inspection_project/android/app/src/main" "$inspection_project/lib"
+  case "$inspection_build_runner_section" in
+    dev_dependencies)
+      cat > "$inspection_project/pubspec.yaml" <<'YAML'
+name: inspection_fixture
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+  flutter: ">=3.19.0"
+version: 1.2.3+45
+dependencies:
+  flutter:
+    sdk: flutter
+dev_dependencies:
+  build_runner: ^2.4.9
+YAML
+      ;;
+    dependencies)
+      cat > "$inspection_project/pubspec.yaml" <<'YAML'
+name: inspection_fixture
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+  flutter: 3.22.0
+version: 3.0.0+300
+dependencies:
+  flutter:
+    sdk: flutter
+  build_runner: ^2.4.11
+dev_dependencies:
+  test: any
+YAML
+      ;;
+    *) fail 'unknown build_runner fixture section' ;;
+  esac
+  printf 'void main() {}\n' > "$inspection_project/lib/main.dart"
+}
+
+inspection_write_wrapper() {
+  inspection_project=$1
+  inspection_gradle_version=$2
+  mkdir -p "$inspection_project/android/gradle/wrapper"
+  printf 'distributionUrl=https\\://services.gradle.org/distributions/gradle-%s-bin.zip\n' \
+    "$inspection_gradle_version" > "$inspection_project/android/gradle/wrapper/gradle-wrapper.properties"
+}
+
+inspection_make_groovy() {
+  inspection_project=$1
+  inspection_write_pubspec "$inspection_project" dev_dependencies
+  inspection_write_wrapper "$inspection_project" 8.7
+  cat > "$inspection_project/android/settings.gradle" <<'GRADLE'
+pluginManagement {}
+plugins {
+    // id "com.android.application" version "99.0.0" apply false
+    id "com.android.application" version "8.5.2" apply false
+}
+GRADLE
+  cat > "$inspection_project/android/app/build.gradle" <<'GRADLE'
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.example.release"
+    /* Inactive documentation example:
+    defaultConfig {
+        applicationId "CHANGE_ME_APPLICATION_ID"
+    }
+    */
+    compileOptions {
+        // sourceCompatibility JavaVersion.VERSION_99
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    defaultConfig {
+        applicationId "com.example.release"
+        versionCode 45
+        versionName "1.2.3"
+    }
+    signingConfigs {
+        upload {
+            storeFile file(keystoreProperties["storeFile"])
+        }
+    }
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
+        release {
+            signingConfig signingConfigs.upload
+        }
+    }
+}
+
+def ignoredSecret = "FPRS_GRADLE_SECRET_CANARY_18d90b"
+new File(System.getenv("FPRS_INSPECTION_EXEC_MARKER") ?: "/dev/null").text = "executed"
+GRADLE
+}
+
+inspection_make_kotlin() {
+  inspection_project=$1
+  inspection_write_pubspec "$inspection_project" dependencies
+  inspection_write_wrapper "$inspection_project" 8.10.2
+  printf '{"flutter":"3.22.3"}\n' > "$inspection_project/.fvmrc"
+  cat > "$inspection_project/android/settings.gradle.kts" <<'KOTLIN'
+pluginManagement {}
+plugins {
+    id("com.android.application") version "8.7.3" apply false
+}
+KOTLIN
+  cat > "$inspection_project/android/gradle.properties" <<'PROPERTIES'
+VERSION_NAME=7.4.0
+VERSION_CODE=740
+PROPERTIES
+  cat > "$inspection_project/android/app/build.gradle.kts" <<'KOTLIN'
+plugins {
+    id("com.android.application")
+}
+
+android {
+    namespace = "com.acme.shell"
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
+    }
+    flavorDimensions += "environment"
+    productFlavors {
+        create("staging") {
+            applicationIdSuffix = ".staging"
+            versionCode = 999
+            versionName = "9.9.9"
+        }
+        create("release") {
+            applicationId = "com.acme.mobile.release"
+        }
+    }
+    defaultConfig {
+        applicationId = "com.acme.mobile"
+        versionCode = (project.findProperty("VERSION_CODE") ?: "1").toString().toInt()
+        versionName = (project.findProperty("VERSION_NAME") ?: "1.0").toString()
+    }
+    buildTypes {
+        getByName("release") { signingConfig = signingConfigs.getByName("debug") }
+    }
+}
+KOTLIN
+  printf 'void main() {}\n' > "$inspection_project/lib/main_release.dart"
+  mkdir -p "$inspection_project/android/fastlane" "$inspection_project/.github/workflows"
+  printf 'firebase_app_distribution(app: ENV["FIREBASE_APP_ID"])\n' \
+    > "$inspection_project/android/fastlane/Fastfile"
+  printf 'name: release\n' > "$inspection_project/.github/workflows/release-android.yml"
+  mkdir -p "$inspection_project/android/app/src/release"
+  printf '%s\n' '{"project_info":{"project_number":"FPRS_FIREBASE_PROJECT_CANARY_7364f1","project_id":"not-for-output"},"client":[{"client_info":{"mobilesdk_app_id":"1:123456789:android:releaseabc","android_client_info":{"package_name":"com.acme.mobile.release"}},"api_key":[{"current_key":"FPRS_FIREBASE_API_KEY_CANARY_aa90e2"}]},{"client_info":{"mobilesdk_app_id":"1:123456789:android:legacyabc","android_client_info":{"package_name":"com.acme.legacy"}}}]}' \
+    > "$inspection_project/android/app/src/release/google-services.json"
+}
+
+inspection_make_minimal_kotlin() {
+  inspection_project=$1
+  inspection_write_pubspec "$inspection_project" dev_dependencies
+  inspection_write_wrapper "$inspection_project" 8.9
+  cat > "$inspection_project/android/settings.gradle.kts" <<'KOTLIN'
+plugins {
+    id("com.android.application") version "8.6.1" apply false
+}
+KOTLIN
+  cat > "$inspection_project/android/app/build.gradle.kts" <<'KOTLIN'
+android {
+    namespace = "com.example.kotlin"
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+    }
+    defaultConfig {
+        applicationId = "com.example.kotlin"
+        versionCode = 1_045
+        versionName = "1.2.3"
+    }
+}
+KOTLIN
+}
+
+inspection_make_unresolved() {
+  inspection_project=$1
+  inspection_write_pubspec "$inspection_project" dev_dependencies
+  inspection_write_wrapper "$inspection_project" 8.6
+  cat > "$inspection_project/android/settings.gradle" <<'GRADLE'
+plugins {
+    id "com.android.application" version "8.4.1" apply false
+}
+GRADLE
+  cat > "$inspection_project/android/app/build.gradle" <<'GRADLE'
+android {
+    namespace namespaceFromEnvironment()
+    defaultConfig {
+        applicationId applicationIdFromEnvironment()
+        versionCode 1 + calculateVersionCode()
+        versionName calculateVersionName()
+    }
+}
+GRADLE
+}
+
+inspection_make_dynamic_suffix() {
+  inspection_project=$1
+  inspection_write_pubspec "$inspection_project" dev_dependencies
+  inspection_write_wrapper "$inspection_project" 8.7
+  cat > "$inspection_project/android/settings.gradle" <<'GRADLE'
+plugins {
+    id "com.android.application" version "8.5.2" apply false
+}
+GRADLE
+  cat > "$inspection_project/android/app/build.gradle" <<'GRADLE'
+android {
+    namespace "com.example.base"
+    defaultConfig {
+        applicationId "com.example.base"
+        versionCode 45
+        versionName "1.2.3"
+    }
+    productFlavors {
+        release {
+            applicationIdSuffix ".release" + suffixFromEnvironment()
+        }
+    }
+}
+GRADLE
+  printf 'void main() {}\n' > "$inspection_project/lib/main_release.dart"
+}
+
+inspection_make_literal_suffix() {
+  inspection_project=$1
+  inspection_make_dynamic_suffix "$inspection_project"
+  sed 's/applicationIdSuffix .*/applicationIdSuffix ".release"/' \
+    "$inspection_project/android/app/build.gradle" \
+    > "$inspection_project/android/app/build.gradle.next"
+  mv "$inspection_project/android/app/build.gradle.next" \
+    "$inspection_project/android/app/build.gradle"
+}
+
+inspection_make_multidimension() {
+  inspection_project=$1
+  inspection_write_pubspec "$inspection_project" dev_dependencies
+  inspection_write_wrapper "$inspection_project" 8.7
+  cat > "$inspection_project/android/settings.gradle" <<'GRADLE'
+plugins {
+    id "com.android.application" version "8.5.2" apply false
+}
+GRADLE
+  cat > "$inspection_project/android/app/build.gradle" <<'GRADLE'
+android {
+    namespace "com.example.multi"
+    defaultConfig {
+        applicationId "com.example.multi"
+        versionCode 45
+        versionName "1.2.3"
+    }
+    flavorDimensions configuredDimensions
+    productFlavors {
+        free {
+            dimension tierDimension
+            applicationIdSuffix ".free"
+        }
+        production {
+            dimension environmentDimension
+            applicationIdSuffix ".production"
+        }
+    }
+}
+GRADLE
+}
+
+inspection_assert_no_canary_logs() {
+  for inspection_canary in \
+    FPRS_GRADLE_SECRET_CANARY_18d90b \
+    FPRS_FIREBASE_PROJECT_CANARY_7364f1 \
+    FPRS_FIREBASE_API_KEY_CANARY_aa90e2
+  do
+    if grep -R -F -- "$inspection_canary" "$INSPECTION_LOGS" >/dev/null 2>&1; then
+      fail 'inspection output exposed a secret canary'
+    fi
+  done
+}
+
+inspection() {
+  INSPECTOR="$PACKAGE_ROOT/scripts/inspect_flutter_project.sh"
+  INSPECTION_ROOT="$TMP_ROOT/inspection fixtures"
+  INSPECTION_LOGS="$INSPECTION_ROOT/logs"
+  inspection_case_index=0
+  mkdir -p "$INSPECTION_LOGS"
+
+  groovy_project="$INSPECTION_ROOT/path with spaces/groovy app"
+  inspection_make_groovy "$groovy_project"
+  groovy_project=$(CDPATH= cd -- "$groovy_project" && pwd -P) ||
+    fail 'could not resolve Groovy fixture physically'
+  exec_marker="$INSPECTION_ROOT/project-command-executed"
+
+  inspection_assert_status 'minimal Groovy JSON inspection failed' 0 \
+    env FPRS_INSPECTION_EXEC_MARKER="$exec_marker" \
+    "$INSPECTOR" --project "$groovy_project" --format json
+  inspection_assert_schema "$INSPECTION_LAST_STDOUT"
+  assert_empty_file "$INSPECTION_LAST_STDERR" 'successful JSON inspection wrote diagnostics to stderr'
+  [ ! -e "$exec_marker" ] || fail 'inspection evaluated the Gradle project'
+  cat > "$INSPECTION_ROOT/expected-groovy.json" <<EOF
+{"schema_version":1,"project_root":"$groovy_project","flutter_constraint":">=3.19.0","dart_constraint":">=3.3.0 <4.0.0","flutter_version":null,"android_dsl":"groovy","gradle_file":"android/app/build.gradle","android_gradle_plugin_version":"8.5.2","gradle_wrapper_version":"8.7","java_compatibility":"17","application_id":"com.example.release","namespace":"com.example.release","application_id_candidates":["com.example.release"],"version_name":"1.2.3","version_code":"45","pubspec_version_name":"1.2.3","pubspec_build_number":"45","flavors":[],"selected_flavor":null,"suggested_flavor":null,"suggestion_confirmed":false,"entrypoints":["lib/main.dart"],"build_runner":true,"fastlane":false,"github_actions":false,"release_signing":true,"release_uses_debug_signing":false,"firebase":false,"firebase_package_names":[],"firebase_apps":[],"firebase_app_distribution":false,"monorepo":false,"git_dirty":null,"files_bootstrap_may_change":["android/Gemfile","android/Gemfile.lock","android/fastlane/Appfile","android/fastlane/Fastfile","android/fastlane/Pluginfile","android/fastlane/lib/flutter_play_store_release.rb","android/fastlane/.env.example","android/key.properties.example",".github/workflows/release-android.yml","docs/PLAY_STORE_RELEASE.md","tool/flutter-play-store-release/decode_secret.sh","tool/flutter-play-store-release/install_flutter_sdk.sh","tool/flutter-play-store-release/managed-files.sha256",".gitignore","android/app/build.gradle"],"warnings":[],"failures":[]}
+EOF
+  assert_same_file \
+    "$INSPECTION_ROOT/expected-groovy.json" \
+    "$INSPECTION_LAST_STDOUT" \
+    'minimal Groovy JSON changed'
+
+  inspection_assert_status 'minimal Groovy human inspection failed' 0 \
+    "$INSPECTOR" --project "$groovy_project" --format human
+  assert_empty_file "$INSPECTION_LAST_STDERR" 'successful human inspection wrote diagnostics to stderr'
+  cat > "$INSPECTION_ROOT/expected-groovy.human" <<EOF
+Flutter project inspection
+Schema version: 1
+Project root: $groovy_project
+Flutter constraint: >=3.19.0
+Dart constraint: >=3.3.0 <4.0.0
+Flutter version: unknown
+Android DSL: groovy
+Gradle file: android/app/build.gradle
+Android Gradle plugin: 8.5.2
+Gradle wrapper: 8.7
+Java compatibility: 17
+Application ID: com.example.release
+Namespace: com.example.release
+Application ID candidates: com.example.release
+Version name: 1.2.3
+Version code: 45
+Pubspec version name: 1.2.3
+Pubspec build number: 45
+Flavors: none
+Selected flavor: none
+Suggested flavor: none
+Suggestion confirmed: no
+Entrypoints: lib/main.dart
+Build runner: yes
+Fastlane: no
+GitHub Actions: no
+Release signing: yes
+Release uses debug signing: no
+Firebase: no
+Firebase package names: none
+Firebase apps: none
+Firebase App Distribution: no
+Monorepo: no
+Git dirty: unknown
+Files bootstrap may change: android/Gemfile, android/Gemfile.lock, android/fastlane/Appfile, android/fastlane/Fastfile, android/fastlane/Pluginfile, android/fastlane/lib/flutter_play_store_release.rb, android/fastlane/.env.example, android/key.properties.example, .github/workflows/release-android.yml, docs/PLAY_STORE_RELEASE.md, tool/flutter-play-store-release/decode_secret.sh, tool/flutter-play-store-release/install_flutter_sdk.sh, tool/flutter-play-store-release/managed-files.sha256, .gitignore, android/app/build.gradle
+Warnings: none
+Failures: none
+EOF
+  assert_same_file \
+    "$INSPECTION_ROOT/expected-groovy.human" \
+    "$INSPECTION_LAST_STDOUT" \
+    'minimal Groovy human report changed'
+
+  ln -s "$groovy_project" "$INSPECTION_ROOT/groovy alias"
+  inspection_assert_status 'physical project-root resolution failed' 0 \
+    "$INSPECTOR" --project "$INSPECTION_ROOT/groovy alias" --format json
+  inspection_assert_json_fragment \
+    "$INSPECTION_LAST_STDOUT" \
+    "\"project_root\":\"$groovy_project\"" \
+    'inspection did not resolve the project root physically'
+
+  minimal_kotlin_project="$INSPECTION_ROOT/minimal kotlin app"
+  inspection_make_minimal_kotlin "$minimal_kotlin_project"
+  inspection_assert_status 'minimal Kotlin JSON inspection failed' 0 \
+    "$INSPECTOR" --project "$minimal_kotlin_project" --format json
+  inspection_assert_schema "$INSPECTION_LAST_STDOUT"
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"android_dsl":"kotlin","gradle_file":"android/app/build.gradle.kts","android_gradle_plugin_version":"8.6.1","gradle_wrapper_version":"8.9","java_compatibility":"17"' \
+    'minimal Kotlin Gradle fields changed'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"application_id":"com.example.kotlin","namespace":"com.example.kotlin","application_id_candidates":["com.example.kotlin"]' \
+    'minimal Kotlin application identity changed'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"version_name":"1.2.3","version_code":"1045"' \
+    'minimal Kotlin numeric version literal changed'
+
+  kotlin_project="$INSPECTION_ROOT/kotlin app"
+  inspection_make_kotlin "$kotlin_project"
+  inspection_assert_status 'ambiguous Kotlin flavor inspection did not use exit 2' 2 \
+    "$INSPECTOR" --project "$kotlin_project" --format json
+  inspection_assert_schema "$INSPECTION_LAST_STDOUT"
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"android_dsl":"kotlin"' 'Kotlin DSL was not detected'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"application_id":null' 'ambiguous flavor unexpectedly selected an application ID'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"application_id_candidates":["com.acme.mobile.release","com.acme.mobile.staging"]' \
+    'flavor application-ID candidates changed'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"flavors":["release","staging"]' 'Kotlin flavors changed'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"selected_flavor":null,"suggested_flavor":"release","suggestion_confirmed":false' \
+    'entrypoint flavor suggestion was not conservative'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"failures":["multiple product flavors require --flavor"]' \
+    'ambiguous flavors did not produce a stable failure'
+  grep -F 'multiple product flavors require --flavor' "$INSPECTION_LAST_STDERR" >/dev/null 2>&1 ||
+    fail 'ambiguous JSON inspection did not diagnose on stderr'
+
+  inspection_assert_status 'explicit Kotlin release flavor inspection failed' 0 \
+    "$INSPECTOR" --project "$kotlin_project" --format json --flavor release
+  inspection_assert_schema "$INSPECTION_LAST_STDOUT"
+  assert_empty_file "$INSPECTION_LAST_STDERR" 'selected Kotlin flavor emitted diagnostics'
+  for inspection_fragment in \
+    '"flutter_constraint":"3.22.0","dart_constraint":">=3.4.0 <4.0.0","flutter_version":"3.22.3"' \
+    '"android_gradle_plugin_version":"8.7.3","gradle_wrapper_version":"8.10.2","java_compatibility":"21"' \
+    '"application_id":"com.acme.mobile.release","namespace":"com.acme.shell"' \
+    '"version_name":"7.4.0","version_code":"740","pubspec_version_name":"3.0.0","pubspec_build_number":"300"' \
+    '"selected_flavor":"release","suggested_flavor":"release","suggestion_confirmed":true' \
+    '"entrypoints":["lib/main.dart","lib/main_release.dart"],"build_runner":true' \
+    '"fastlane":true,"github_actions":true,"release_signing":false,"release_uses_debug_signing":true,"firebase":true' \
+    '"firebase_package_names":["com.acme.mobile.release","com.acme.legacy"]' \
+    '"firebase_apps":[{"package_name":"com.acme.mobile.release","app_id":"1:123456789:android:releaseabc","matches_application_id":true},{"package_name":"com.acme.legacy","app_id":"1:123456789:android:legacyabc","matches_application_id":false}]' \
+    '"firebase_app_distribution":true' \
+    '"files_bootstrap_may_change":["android/Gemfile","android/Gemfile.lock","android/fastlane/Appfile","android/fastlane/Fastfile","android/fastlane/Pluginfile","android/fastlane/lib/flutter_play_store_release.rb","android/fastlane/.env.example","android/key.properties.example",".github/workflows/release-android.yml","docs/PLAY_STORE_RELEASE.md","tool/flutter-play-store-release/decode_secret.sh","tool/flutter-play-store-release/install_flutter_sdk.sh","tool/flutter-play-store-release/managed-files.sha256",".gitignore","android/app/build.gradle.kts"]' \
+    '"warnings":["namespace differs from default application ID","release build type uses debug signing"],"failures":[]'
+  do
+    inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" "$inspection_fragment" \
+      "selected Kotlin inspection missing: $inspection_fragment"
+  done
+
+  dynamic_suffix_project="$INSPECTION_ROOT/dynamic suffix app"
+  inspection_make_dynamic_suffix "$dynamic_suffix_project"
+  inspection_assert_status 'dynamic application-ID suffix inspection failed' 0 \
+    "$INSPECTOR" --project "$dynamic_suffix_project" --format json --flavor release
+  inspection_assert_schema "$INSPECTION_LAST_STDOUT"
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"application_id":null,"namespace":"com.example.base","application_id_candidates":[]' \
+    'dynamic suffix was collapsed into a concrete release application ID'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"warnings":["application ID suffix expression could not be resolved for flavor release"]' \
+    'dynamic suffix warning changed'
+
+  literal_suffix_project="$INSPECTION_ROOT/literal suffix app"
+  inspection_make_literal_suffix "$literal_suffix_project"
+  inspection_assert_status 'literal application-ID suffix inspection failed' 0 \
+    "$INSPECTOR" --project "$literal_suffix_project" --format json --flavor release
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"application_id":"com.example.base.release","namespace":"com.example.base","application_id_candidates":["com.example.base.release"]' \
+    'literal suffix release identity changed'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"warnings":[],"failures":[]' \
+    'normal namespace/base identity produced a flavor suffix mismatch warning'
+
+  multidimension_project="$INSPECTION_ROOT/multiple flavor dimensions app"
+  inspection_make_multidimension "$multidimension_project"
+  inspection_assert_status 'multiple flavor dimensions did not remain ambiguous' 2 \
+    "$INSPECTOR" --project "$multidimension_project" --format json
+  inspection_assert_schema "$INSPECTION_LAST_STDOUT"
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"application_id":null,"namespace":"com.example.multi","application_id_candidates":[]' \
+    'multiple flavor dimensions produced nonexistent application-ID candidates'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"warnings":["flavor dimension expressions prevent deterministic application ID resolution"]' \
+    'multiple flavor dimension warning changed'
+
+  override_only_project="$INSPECTION_ROOT/dependency override app"
+  inspection_make_groovy "$override_only_project"
+  cat > "$override_only_project/pubspec.yaml" <<'YAML'
+name: dependency_override_fixture
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+dependencies:
+  flutter:
+    sdk: flutter
+dependency_overrides:
+  build_runner: ^2.4.9
+YAML
+  inspection_assert_status 'dependency override inspection failed' 0 \
+    "$INSPECTOR" --project "$override_only_project" --format json
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"build_runner":false' 'dependency_overrides was treated as a declared build_runner dependency'
+
+  mkdir -p "$INSPECTION_ROOT/no dependency tools"
+  for inspection_tool in jq python python3 ruby
+  do
+    cat > "$INSPECTION_ROOT/no dependency tools/$inspection_tool" <<'SH'
+#!/bin/sh
+exit 97
+SH
+    chmod +x "$INSPECTION_ROOT/no dependency tools/$inspection_tool"
+  done
+  inspection_assert_status 'inspection required a forbidden JSON dependency' 0 \
+    env PATH="$INSPECTION_ROOT/no dependency tools:$PATH" \
+    "$INSPECTOR" --project "$groovy_project" --format json
+  inspection_assert_schema "$INSPECTION_LAST_STDOUT"
+
+  unresolved_project="$INSPECTION_ROOT/unresolved expressions"
+  inspection_make_unresolved "$unresolved_project"
+  inspection_assert_status 'unresolved static expressions were treated as executable' 0 \
+    "$INSPECTOR" --project "$unresolved_project" --format json
+  inspection_assert_schema "$INSPECTION_LAST_STDOUT"
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"application_id":null,"namespace":null,"application_id_candidates":[]' \
+    'unresolved identifiers were reported as concrete values'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"warnings":["application ID expression could not be resolved","namespace expression could not be resolved","version code expression could not be resolved","version name expression could not be resolved"]' \
+    'unresolved expression warnings changed'
+
+  monorepo_project="$INSPECTION_ROOT/monorepo workspace/apps/mobile"
+  mkdir -p "$INSPECTION_ROOT/monorepo workspace"
+  printf 'name: fixture_workspace\nworkspace:\n  - apps/mobile\n' \
+    > "$INSPECTION_ROOT/monorepo workspace/pubspec.yaml"
+  inspection_make_groovy "$monorepo_project"
+  inspection_assert_status 'nested monorepo inspection failed' 0 \
+    "$INSPECTOR" --project "$monorepo_project" --format json
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"monorepo":true' 'nested monorepo was not detected'
+
+  dirty_project="$INSPECTION_ROOT/dirty git app"
+  inspection_make_groovy "$dirty_project"
+  git -C "$dirty_project" init -q || fail 'could not initialize Git fixture'
+  git -C "$dirty_project" add . || fail 'could not stage Git fixture'
+  git -C "$dirty_project" -c user.name=Fixture -c user.email=fixture@example.invalid \
+    commit -qm initial || fail 'could not commit Git fixture'
+  printf '# dirty\n' >> "$dirty_project/pubspec.yaml"
+  inspection_assert_status 'dirty Git inspection failed' 0 \
+    "$INSPECTOR" --project "$dirty_project" --format json
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"git_dirty":true' 'dirty Git state was not detected'
+  mkdir "$dirty_project/broken git index"
+  inspection_assert_status 'Git status failure inspection failed' 0 \
+    env GIT_INDEX_FILE="$dirty_project/broken git index" \
+    "$INSPECTOR" --project "$dirty_project" --format json
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"git_dirty":null' 'Git status failure was misreported as a clean worktree'
+  inspection_assert_json_fragment "$INSPECTION_ROOT/expected-groovy.json" \
+    '"git_dirty":null' 'non-Git baseline fixture changed'
+
+  non_flutter_parent="$INSPECTION_ROOT/non Flutter parent"
+  inspection_make_groovy "$non_flutter_parent"
+  mkdir -p "$non_flutter_parent/nested child"
+  inspection_assert_status 'nested non-Flutter path was silently promoted upward' 2 \
+    "$INSPECTOR" --project "$non_flutter_parent/nested child" --format json
+  assert_empty_file "$INSPECTION_LAST_STDOUT" 'invalid project root emitted partial JSON'
+  grep -F 'pubspec.yaml' "$INSPECTION_LAST_STDERR" >/dev/null 2>&1 ||
+    fail 'invalid project root did not name the missing Flutter marker'
+
+  both_dsl_project="$INSPECTION_ROOT/both DSL app"
+  inspection_make_groovy "$both_dsl_project"
+  printf 'android {}\n' > "$both_dsl_project/android/app/build.gradle.kts"
+  inspection_assert_status 'both Android DSL files were accepted' 2 \
+    "$INSPECTOR" --project "$both_dsl_project" --format json
+  inspection_assert_schema "$INSPECTION_LAST_STDOUT"
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"android_dsl":"ambiguous","gradle_file":null' \
+    'ambiguous DSL did not emit a complete typed state'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"failures":["android/app contains both build.gradle and build.gradle.kts"]' \
+    'ambiguous DSL failure changed'
+  grep -F 'both build.gradle and build.gradle.kts' "$INSPECTION_LAST_STDERR" >/dev/null 2>&1 ||
+    fail 'ambiguous DSL diagnostic changed'
+
+  missing_dsl_project="$INSPECTION_ROOT/missing DSL app"
+  inspection_write_pubspec "$missing_dsl_project" dev_dependencies
+  inspection_assert_status 'missing Android DSL file was accepted' 2 \
+    "$INSPECTOR" --project "$missing_dsl_project" --format json
+  inspection_assert_schema "$INSPECTION_LAST_STDOUT"
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"android_dsl":"missing","gradle_file":null' \
+    'missing DSL did not emit a complete typed state'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"failures":["android/app contains neither build.gradle nor build.gradle.kts"]' \
+    'missing DSL failure changed'
+  grep -F 'neither build.gradle nor build.gradle.kts' "$INSPECTION_LAST_STDERR" >/dev/null 2>&1 ||
+    fail 'missing DSL diagnostic changed'
+  inspection_assert_status 'missing Android DSL human report was not clear' 2 \
+    "$INSPECTOR" --project "$missing_dsl_project" --format human
+  grep -F 'Android DSL: missing' "$INSPECTION_LAST_STDOUT" >/dev/null 2>&1 ||
+    fail 'missing DSL human report omitted the DSL state'
+  grep -F 'Failures: android/app contains neither build.gradle nor build.gradle.kts' \
+    "$INSPECTION_LAST_STDOUT" >/dev/null 2>&1 ||
+    fail 'missing DSL human report omitted the failure'
+
+  inspection_assert_status 'missing inspector arguments were accepted' 2 "$INSPECTOR"
+  assert_empty_file "$INSPECTION_LAST_STDOUT" 'usage error wrote to stdout'
+  grep -F 'Usage:' "$INSPECTION_LAST_STDERR" >/dev/null 2>&1 || fail 'usage diagnostic changed'
+  inspection_assert_status 'invalid output format was accepted' 2 \
+    "$INSPECTOR" --project "$groovy_project" --format yaml
+  assert_empty_file "$INSPECTION_LAST_STDOUT" 'invalid format wrote to stdout'
+  inspection_assert_status '--help was accepted after another option' 2 \
+    "$INSPECTOR" --project "$groovy_project" --help
+  assert_empty_file "$INSPECTION_LAST_STDOUT" 'ambiguous help arguments wrote to stdout'
+  inspection_assert_status 'unknown flavor was accepted' 2 \
+    "$INSPECTOR" --project "$kotlin_project" --format json --flavor missing
+  inspection_assert_schema "$INSPECTION_LAST_STDOUT"
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"failures":["requested flavor is not defined"]' \
+    'unknown flavor failure changed'
+
+  [ ! -e "$exec_marker" ] || fail 'an inspection mode evaluated the Gradle project'
+  inspection_assert_no_canary_logs
+  pass 'inspection'
+}
+
 case "${1:-all}" in
   all)
     package_contract
     secret_codecs
+    inspection
     ;;
   package_contract)
     package_contract
     ;;
   secret_codecs)
     secret_codecs
+    ;;
+  inspection)
+    inspection
     ;;
   *)
     fail "unknown test group: $1"

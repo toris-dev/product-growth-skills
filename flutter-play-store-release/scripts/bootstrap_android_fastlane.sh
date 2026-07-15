@@ -240,24 +240,41 @@ elif kind == "Gemfile":
         r"^\s*gem\s*(?:\(\s*)?['\"]fastlane['\"]\s*,\s*['\"]= 2\.237\.0['\"]\s*\)?\s*(?:#.*)?$")
     if len(gems) > 1 or (gems and not gem_ok.match(gems[0])):
         raise SystemExit(2)
-    eval_lines = [line for line in base if re.search(r"\beval_gemfile\b", line)]
+    eval_indexes = [index for index, line in enumerate(base)
+                    if re.search(r"\beval_gemfile\b", line)]
+    eval_lines = [base[index] for index in eval_indexes]
     compatible_eval = False
     if len(eval_lines) == 1:
         line = eval_lines[0]
-        direct = re.match(
-            r"^\s*eval_gemfile\s*(?:\(\s*)?(?:['\"]fastlane/Pluginfile['\"]|File\.join\(__dir__,\s*['\"]fastlane['\"],\s*['\"]Pluginfile['\"]\))\s*\)?\s*(?:if\s+File\.exist\?\([^)]*\))?\s*(?:#.*)?$",
+        direct = re.fullmatch(
+            r"\s*eval_gemfile\((.+)\)\s+if\s+File\.exist\?\((.+)\)\s*",
             line)
-        variable = re.match(r"^\s*eval_gemfile\s*\(\s*plugins_path\s*\)\s*if\s+File\.exist\?\(plugins_path\)\s*$", line)
-        assignment = any(re.match(
-            r"^\s*plugins_path\s*=\s*File\.join\(__dir__,\s*['\"]fastlane['\"],\s*['\"]Pluginfile['\"]\)\s*$", candidate)
-            for candidate in base)
-        compatible_eval = bool(direct or (variable and assignment))
+        if direct and direct.group(1) == direct.group(2):
+            expression = direct.group(1)
+            compatible_eval = bool(
+                re.fullmatch(r"['\"]fastlane/Pluginfile['\"]", expression) or
+                re.fullmatch(
+                    r"File\.join\(__dir__,\s*['\"]fastlane['\"],\s*['\"]Pluginfile['\"]\)",
+                    expression))
+        variable = re.fullmatch(
+            r"\s*eval_gemfile\(plugins_path\)\s+if\s+File\.exist\?\(plugins_path\)\s*",
+            line)
+        assignments = [index for index, candidate in enumerate(base)
+                       if re.match(r"^\s*plugins_path\s*=", candidate)]
+        exact_assignment = re.fullmatch(
+            r"\s*plugins_path\s*=\s*File\.join\(__dir__,\s*['\"]fastlane['\"],\s*['\"]Pluginfile['\"]\)\s*",
+            base[assignments[0]]) if len(assignments) == 1 else None
+        plugin_path_uses = sum(
+            len(re.findall(r"\bplugins_path\b", candidate)) for candidate in base)
+        if (variable and exact_assignment and assignments[0] + 1 == eval_indexes[0]
+                and plugin_path_uses == 3):
+            compatible_eval = True
     if len(eval_lines) > 1 or (eval_lines and not compatible_eval):
         raise SystemExit(2)
     if not gems:
         desired.append('gem "fastlane", "= 2.237.0"')
     if not eval_lines:
-        desired.append('eval_gemfile(File.join(__dir__, "fastlane", "Pluginfile"))')
+        desired.append('eval_gemfile(File.join(__dir__, "fastlane", "Pluginfile")) if File.exist?(File.join(__dir__, "fastlane", "Pluginfile"))')
 else:
     raise SystemExit(2)
 
@@ -282,6 +299,131 @@ PY
   ruby -c "$bootstrap_output" >/dev/null 2>&1 || return 2
   bootstrap_merge_mode=$(fprs_file_mode "$bootstrap_target") || return 1
   chmod "$bootstrap_merge_mode" "$bootstrap_output" 2>/dev/null
+}
+
+fprs_bootstrap_dependency_scan() {
+  python3 - "$1" "$2" <<'PY'
+import re
+import sys
+
+kind, path = sys.argv[1:]
+expected = {
+    "Gemfile": "fastlane",
+    "Pluginfile": "fastlane-plugin-firebase_app_distribution",
+}.get(kind)
+if expected is None:
+    raise SystemExit(2)
+extra = False
+pattern = re.compile(
+    r"^\s*gem\s*(?:\(\s*)?['\"]([A-Za-z0-9_.-]+)['\"]"
+    r"(?:\s*,\s*['\"]([^'\"]+)['\"])?\s*\)?\s*(?:#.*)?$")
+try:
+    lines = open(path, "r", encoding="utf-8").read().splitlines()
+except (OSError, UnicodeError):
+    raise SystemExit(2)
+for line in lines:
+    if not re.match(r"^\s*gem\b", line):
+        continue
+    match = pattern.fullmatch(line)
+    if match is None:
+        raise SystemExit(2)
+    if match.group(1) != expected:
+        extra = True
+raise SystemExit(0 if extra else 1)
+PY
+}
+
+fprs_bootstrap_regenerate_lock() {
+  local bootstrap_lock_output bootstrap_dependency_root bootstrap_bundle_home
+  local bootstrap_gemfile_candidate bootstrap_pluginfile_candidate bootstrap_lock_mode
+  bootstrap_lock_output=$1
+  bootstrap_dependency_root="$bootstrap_stage/dependency-tree"
+  bootstrap_bundle_home="$bootstrap_stage/bundle-home"
+  bootstrap_gemfile_candidate=$(awk -F '|' \
+    '$1 == "android/Gemfile" { print $3; found = 1 } END { exit(found ? 0 : 1) }' \
+    "$bootstrap_stage/plan.unsorted") || return 2
+  bootstrap_pluginfile_candidate=$(awk -F '|' \
+    '$1 == "android/fastlane/Pluginfile" { print $3; found = 1 } END { exit(found ? 0 : 1) }' \
+    "$bootstrap_stage/plan.unsorted") || return 2
+  [ -f "$bootstrap_gemfile_candidate" ] && [ ! -L "$bootstrap_gemfile_candidate" ] &&
+    [ -f "$bootstrap_pluginfile_candidate" ] && [ ! -L "$bootstrap_pluginfile_candidate" ] ||
+    return 2
+  mkdir -p "$bootstrap_dependency_root/android/fastlane" "$bootstrap_bundle_home" || return 1
+  chmod 700 "$bootstrap_dependency_root" "$bootstrap_bundle_home" 2>/dev/null || return 1
+  cp "$bootstrap_gemfile_candidate" "$bootstrap_dependency_root/android/Gemfile" || return 1
+  cp "$bootstrap_pluginfile_candidate" \
+    "$bootstrap_dependency_root/android/fastlane/Pluginfile" || return 1
+  command -v bundle >/dev/null 2>&1 || return 2
+  (
+    CDPATH= cd -- "$bootstrap_dependency_root/android" 2>/dev/null || exit 1
+    BUNDLE_GEMFILE="$bootstrap_dependency_root/android/Gemfile" \
+      BUNDLE_USER_HOME="$bootstrap_bundle_home" \
+      BUNDLE_APP_CONFIG="$bootstrap_bundle_home/config" \
+      BUNDLE_DISABLE_VERSION_CHECK=true \
+      bundle _4.0.16_ lock --local
+  ) > "$bootstrap_stage/bundle-lock.stdout" 2> "$bootstrap_stage/bundle-lock.stderr" || return 2
+  [ -f "$bootstrap_dependency_root/android/Gemfile.lock" ] &&
+    [ ! -L "$bootstrap_dependency_root/android/Gemfile.lock" ] || return 2
+  python3 - "$bootstrap_dependency_root/android/Gemfile" \
+    "$bootstrap_dependency_root/android/fastlane/Pluginfile" \
+    "$bootstrap_dependency_root/android/Gemfile.lock" <<'PY' || return 2
+import re
+import sys
+
+gemfile, pluginfile, lockfile = sys.argv[1:]
+gem_pattern = re.compile(
+    r"^\s*gem\s*(?:\(\s*)?['\"]([A-Za-z0-9_.-]+)['\"]"
+    r"(?:\s*,\s*['\"]([^'\"]+)['\"])?\s*\)?\s*(?:#.*)?$")
+expected = {}
+try:
+    for path in (gemfile, pluginfile):
+        for line in open(path, "r", encoding="utf-8"):
+            if not re.match(r"^\s*gem\b", line):
+                continue
+            match = gem_pattern.fullmatch(line.rstrip("\r\n"))
+            if match is None or match.group(1) in expected:
+                raise ValueError
+            expected[match.group(1)] = match.group(2)
+    lines = open(lockfile, "r", encoding="utf-8").read().splitlines()
+except (OSError, UnicodeError, ValueError):
+    raise SystemExit(1)
+
+try:
+    start = lines.index("DEPENDENCIES") + 1
+except ValueError:
+    raise SystemExit(1)
+locked = {}
+dependency_pattern = re.compile(r"^  ([A-Za-z0-9_.-]+)(?: \(([^)]+)\))?$")
+for line in lines[start:]:
+    if line and not line.startswith("  "):
+        break
+    if not line:
+        continue
+    match = dependency_pattern.fullmatch(line)
+    if match is None or match.group(1) in locked:
+        raise SystemExit(1)
+    locked[match.group(1)] = match.group(2)
+if locked != expected:
+    raise SystemExit(1)
+try:
+    bundled = lines.index("BUNDLED WITH")
+except ValueError:
+    raise SystemExit(1)
+if bundled + 1 >= len(lines) or lines[bundled + 1].strip() != "4.0.16":
+    raise SystemExit(1)
+if expected.get("fastlane") != "= 2.237.0":
+    raise SystemExit(1)
+if expected.get("fastlane-plugin-firebase_app_distribution") != "= 1.0.0":
+    raise SystemExit(1)
+PY
+  cp "$bootstrap_dependency_root/android/Gemfile.lock" "$bootstrap_lock_output" || return 1
+  if [ -f "$project_root/android/Gemfile.lock" ] &&
+    [ ! -L "$project_root/android/Gemfile.lock" ]; then
+    bootstrap_lock_mode=$(fprs_file_mode "$project_root/android/Gemfile.lock") || return 1
+  else
+    bootstrap_lock_mode=$(fprs_file_mode "$PACKAGE_ROOT/templates/Gemfile.lock") || return 1
+  fi
+  chmod "$bootstrap_lock_mode" "$bootstrap_lock_output" 2>/dev/null
 }
 
 fprs_bootstrap_mergeable() {
@@ -374,7 +516,7 @@ fprs_bootstrap_mergeable() {
 
 fprs_bootstrap_candidate() {
   local bootstrap_relative bootstrap_target bootstrap_output bootstrap_source
-  local bootstrap_candidate_mode bootstrap_plan_relative bootstrap_plan_classification
+  local bootstrap_candidate_mode bootstrap_merge_status bootstrap_plan_relative bootstrap_plan_classification
   local bootstrap_plan_candidate bootstrap_plan_managed bootstrap_plan_hash
   bootstrap_relative=$1
   bootstrap_target=$2
@@ -393,7 +535,7 @@ fprs_bootstrap_candidate() {
         do
           [ "$bootstrap_plan_managed" = whole ] || continue
           case "$bootstrap_plan_classification" in
-            create|preserve|update-owned)
+            create|preserve|update-owned|merge)
               bootstrap_plan_hash=$(fprs_bootstrap_sha256 "$bootstrap_plan_candidate") || exit 1
               printf '%s %s\n' "$bootstrap_plan_hash" "$bootstrap_plan_relative"
               ;;
@@ -401,6 +543,12 @@ fprs_bootstrap_candidate() {
         done >> "$bootstrap_output" || return 1
       chmod 644 "$bootstrap_output" 2>/dev/null
       return
+      ;;
+    android/Gemfile.lock)
+      if [ -f "$bootstrap_stage/custom-dependencies" ]; then
+        fprs_bootstrap_regenerate_lock "$bootstrap_output"
+        return
+      fi
       ;;
   esac
   bootstrap_source=$(fprs_bootstrap_source_for "$bootstrap_relative") || return 2
@@ -419,6 +567,20 @@ fprs_bootstrap_candidate() {
     esac
     fprs_bootstrap_safe_merge "$bootstrap_candidate_mode" "$bootstrap_target" \
       "$bootstrap_source" "$bootstrap_output"
+    bootstrap_merge_status=$?
+    [ "$bootstrap_merge_status" -eq 0 ] || return "$bootstrap_merge_status"
+    case "$bootstrap_candidate_mode" in
+      Gemfile|Pluginfile)
+        fprs_bootstrap_dependency_scan "$bootstrap_candidate_mode" "$bootstrap_output"
+        bootstrap_merge_status=$?
+        case "$bootstrap_merge_status" in
+          0) : > "$bootstrap_stage/custom-dependencies" || return 1 ;;
+          1) ;;
+          *) return 2 ;;
+        esac
+        ;;
+    esac
+    return 0
   else
     fprs_bootstrap_copy "$bootstrap_source" "$bootstrap_output" || return 1
     case "$bootstrap_relative" in
@@ -570,6 +732,14 @@ target_count=$(wc -l < "$bootstrap_stage/targets" | tr -d '[:space:]')
   printf 'ERROR: inspector returned an incomplete bootstrap target set\n' >&2
   exit 1
 }
+awk '
+  $0 != "android/Gemfile.lock" &&
+  $0 != "tool/flutter-play-store-release/managed-files.sha256" { print }
+' "$bootstrap_stage/targets" > "$bootstrap_stage/targets.order" || exit 1
+printf '%s\n' \
+  'android/Gemfile.lock' \
+  'tool/flutter-play-store-release/managed-files.sha256' \
+  >> "$bootstrap_stage/targets.order" || exit 1
 
 bootstrap_sidecar="$project_root/tool/flutter-play-store-release/managed-files.sha256"
 bootstrap_sidecar_records="$bootstrap_stage/managed-files.records"
@@ -656,6 +826,8 @@ do
     elif [ "$bootstrap_relative" = tool/flutter-play-store-release/managed-files.sha256 ] ||
       [ "$bootstrap_candidate_owned" -eq 1 ] ||
       [ "$bootstrap_managed" = merge ] ||
+      { [ "$bootstrap_relative" = android/Gemfile.lock ] &&
+        [ -f "$bootstrap_stage/custom-dependencies" ]; } ||
       [ "$bootstrap_relative" = .gitignore ]; then
       fprs_bootstrap_candidate "$bootstrap_relative" "$bootstrap_target" \
         "$bootstrap_candidate"
@@ -690,12 +862,25 @@ do
     fi
   else
     fprs_bootstrap_candidate "$bootstrap_relative" "$bootstrap_target" \
-      "$bootstrap_candidate" || exit 1
-    bootstrap_classification=create
+      "$bootstrap_candidate"
+    candidate_status=$?
+    case "$candidate_status" in
+      0) bootstrap_classification=create ;;
+      2)
+        bootstrap_candidate=
+        bootstrap_conflicts=$((bootstrap_conflicts + 1))
+        [ "$conflict_mode" = skip ] && bootstrap_classification=skip-conflict ||
+          bootstrap_classification=fail-conflict
+        ;;
+      *)
+        printf 'ERROR: bootstrap candidate generation failed operationally\n' >&2
+        exit 1
+        ;;
+    esac
   fi
   printf '%s|%s|%s|%s\n' "$bootstrap_relative" "$bootstrap_classification" \
     "$bootstrap_candidate" "$bootstrap_managed" >> "$bootstrap_stage/plan.unsorted" || exit 1
-done < "$bootstrap_stage/targets"
+done < "$bootstrap_stage/targets.order"
 LC_ALL=C sort -t '|' -k1,1 "$bootstrap_stage/plan.unsorted" > "$bootstrap_stage/plan"
 while IFS='|' read -r bootstrap_relative bootstrap_classification bootstrap_candidate bootstrap_managed
 do

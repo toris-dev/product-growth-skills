@@ -4879,6 +4879,139 @@ PATHS
       fail "safe Fastfile merge omitted or duplicated lane: $required_lane"
   done
 
+  bundle_stub_dir="$BOOTSTRAP_FULL_ROOT/bundle stub"
+  mkdir -p "$bundle_stub_dir"
+  cat > "$bundle_stub_dir/bundle" <<'SH'
+#!/bin/sh
+set -u
+[ "$#" -eq 3 ] && [ "$1" = '_4.0.16_' ] && [ "$2" = lock ] &&
+  [ "$3" = --local ] || exit 91
+[ -n "${BUNDLE_GEMFILE:-}" ] && [ -f "$BUNDLE_GEMFILE" ] || exit 92
+[ -n "${FPRS_TEST_BUNDLE_LOCK_FIXTURE:-}" ] &&
+  [ -f "$FPRS_TEST_BUNDLE_LOCK_FIXTURE" ] || exit 93
+printf '%s\n' "$*" > "${FPRS_TEST_BUNDLE_MARKER:?}"
+cp "$FPRS_TEST_BUNDLE_LOCK_FIXTURE" "${BUNDLE_GEMFILE}.lock"
+SH
+  chmod 755 "$bundle_stub_dir/bundle"
+  awk '
+    /^  fastlane-plugin-firebase_app_distribution \(= 1\.0\.0\)$/ {
+      print
+      print "  rake (= 13.4.2)"
+      next
+    }
+    { print }
+  ' "$PACKAGE_ROOT/templates/Gemfile.lock" > "$BOOTSTRAP_FULL_ROOT/extra-dependency.lock"
+
+  extra_dependency_project="$BOOTSTRAP_FULL_ROOT/extra dependency merge"
+  inspection_make_minimal_kotlin "$extra_dependency_project"
+  printf '%s\n' \
+    'source "https://rubygems.org"' \
+    'gem "rake", "= 13.4.2"' > "$extra_dependency_project/android/Gemfile"
+  bootstrap_full_run 'compatible extra dependency produced a stale canonical lock' 0 \
+    env PATH="$bundle_stub_dir:$PATH" \
+    FPRS_TEST_BUNDLE_LOCK_FIXTURE="$BOOTSTRAP_FULL_ROOT/extra-dependency.lock" \
+    FPRS_TEST_BUNDLE_MARKER="$BOOTSTRAP_FULL_ROOT/bundle-local.marker" \
+    "$BOOTSTRAP" --project "$extra_dependency_project"
+  [ "$(cat "$BOOTSTRAP_FULL_ROOT/bundle-local.marker" 2>/dev/null)" = \
+    '_4.0.16_ lock --local' ] ||
+    fail 'merged dependency lock was not regenerated with exact Bundler local mode'
+  grep -F '  rake (= 13.4.2)' "$extra_dependency_project/android/Gemfile.lock" \
+    >/dev/null 2>&1 || fail 'regenerated lock omitted the compatible extra dependency'
+
+  bundle_failure_dir="$BOOTSTRAP_FULL_ROOT/failing bundle stub"
+  mkdir -p "$bundle_failure_dir"
+  cat > "$bundle_failure_dir/bundle" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" > "${FPRS_TEST_BUNDLE_MARKER:?}"
+exit 17
+SH
+  chmod 755 "$bundle_failure_dir/bundle"
+  extra_failure_project="$BOOTSTRAP_FULL_ROOT/extra dependency unavailable"
+  inspection_make_minimal_kotlin "$extra_failure_project"
+  printf '%s\n' \
+    'source "https://rubygems.org"' \
+    'gem "rake", "= 13.4.2"' > "$extra_failure_project/android/Gemfile"
+  cp -R "$extra_failure_project" "$BOOTSTRAP_FULL_ROOT/extra dependency unavailable baseline"
+  bootstrap_full_run 'unavailable local dependency did not conflict before writes' 2 \
+    env PATH="$bundle_failure_dir:$PATH" \
+    FPRS_TEST_BUNDLE_MARKER="$BOOTSTRAP_FULL_ROOT/bundle-failure.marker" \
+    "$BOOTSTRAP" --project "$extra_failure_project"
+  [ "$(cat "$BOOTSTRAP_FULL_ROOT/bundle-failure.marker" 2>/dev/null)" = \
+    '_4.0.16_ lock --local' ] ||
+    fail 'local dependency failure did not use exact Bundler local mode'
+  bootstrap_full_assert_snapshot \
+    "$BOOTSTRAP_FULL_ROOT/extra dependency unavailable baseline" \
+    "$extra_failure_project" 'local dependency failure made project changes'
+
+  direct_eval_project="$BOOTSTRAP_FULL_ROOT/direct eval import"
+  inspection_make_minimal_kotlin "$direct_eval_project"
+  cat > "$direct_eval_project/android/Gemfile" <<'RUBY'
+source "https://rubygems.org"
+gem "fastlane", "= 2.237.0"
+eval_gemfile(File.join(__dir__, "fastlane", "Pluginfile")) if File.exist?(File.join(__dir__, "fastlane", "Pluginfile"))
+RUBY
+  bootstrap_full_run 'matching direct Pluginfile import was rejected' 0 \
+    "$BOOTSTRAP" --project "$direct_eval_project"
+
+  variable_eval_project="$BOOTSTRAP_FULL_ROOT/variable eval import"
+  inspection_make_minimal_kotlin "$variable_eval_project"
+  cat > "$variable_eval_project/android/Gemfile" <<'RUBY'
+source "https://rubygems.org"
+gem "fastlane", "= 2.237.0"
+plugins_path = File.join(__dir__, "fastlane", "Pluginfile")
+eval_gemfile(plugins_path) if File.exist?(plugins_path)
+RUBY
+  bootstrap_full_run 'unique adjacent variable Pluginfile import was rejected' 0 \
+    "$BOOTSTRAP" --project "$variable_eval_project"
+
+  for eval_conflict_kind in redirected reassigned mismatched-guard duplicate dynamic
+  do
+    eval_strict_project="$BOOTSTRAP_FULL_ROOT/eval strict $eval_conflict_kind"
+    inspection_make_minimal_kotlin "$eval_strict_project"
+    case "$eval_conflict_kind" in
+      redirected)
+        cat > "$eval_strict_project/android/Gemfile" <<'RUBY'
+source "https://rubygems.org"
+plugins_path = File.join(__dir__, "fastlane", "Pluginfile")
+redirected_path = plugins_path
+eval_gemfile(redirected_path) if File.exist?(redirected_path)
+RUBY
+        ;;
+      reassigned)
+        cat > "$eval_strict_project/android/Gemfile" <<'RUBY'
+source "https://rubygems.org"
+plugins_path = File.join(__dir__, "fastlane", "Pluginfile")
+plugins_path = ENV.fetch("PLUGINFILE")
+eval_gemfile(plugins_path) if File.exist?(plugins_path)
+RUBY
+        ;;
+      mismatched-guard)
+        cat > "$eval_strict_project/android/Gemfile" <<'RUBY'
+source "https://rubygems.org"
+eval_gemfile(File.join(__dir__, "fastlane", "Pluginfile")) if File.exist?("other/Pluginfile")
+RUBY
+        ;;
+      duplicate)
+        cat > "$eval_strict_project/android/Gemfile" <<'RUBY'
+source "https://rubygems.org"
+eval_gemfile("fastlane/Pluginfile")
+eval_gemfile("fastlane/Pluginfile")
+RUBY
+        ;;
+      dynamic)
+        cat > "$eval_strict_project/android/Gemfile" <<'RUBY'
+source "https://rubygems.org"
+eval_gemfile(ENV.fetch("PLUGINFILE"))
+RUBY
+        ;;
+    esac
+    cp -R "$eval_strict_project" \
+      "$BOOTSTRAP_FULL_ROOT/eval strict $eval_conflict_kind baseline"
+    bootstrap_full_conflict "unsafe $eval_conflict_kind Pluginfile import was accepted" \
+      "$eval_strict_project" \
+      "$BOOTSTRAP_FULL_ROOT/eval strict $eval_conflict_kind baseline"
+  done
+
   lane_project="$BOOTSTRAP_FULL_ROOT/lane conflict"
   inspection_make_minimal_kotlin "$lane_project"
   mkdir -p "$lane_project/android/fastlane"

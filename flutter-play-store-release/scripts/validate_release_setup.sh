@@ -171,6 +171,30 @@ fprs_validator_active_text() {
 fprs_validator_parse_properties() {
   properties_source=$1
   properties_output=$2
+  properties_parse_kind=$3
+  if [ "$properties_parse_kind" = local ]; then
+    awk '
+      function trim(value) {
+        sub(/^[[:space:]]+/, "", value)
+        sub(/[[:space:]]+$/, "", value)
+        return value
+      }
+      /^[[:space:]]*$/ { next }
+      /^[[:space:]]*#/ { next }
+      {
+        split_at = index($0, "=")
+        if (split_at) {
+          key = trim(substr($0, 1, split_at - 1))
+          value = substr($0, split_at + 1)
+        } else {
+          key = trim($0)
+          value = ""
+        }
+        print key "\t" value
+      }
+    ' "$properties_source" > "$properties_output"
+    return
+  fi
   awk '
     function trim(value) {
       sub(/^[[:space:]]+/, "", value)
@@ -225,13 +249,17 @@ fprs_validator_check_properties() {
       return 1
     fi
   fi
-  if ! fprs_validator_parse_properties "$properties_path" "$properties_records"; then
+  if ! fprs_validator_parse_properties "$properties_path" "$properties_records" \
+    "$properties_kind"; then
     properties_error='properties file is malformed or contains duplicate keys'
     return 1
   fi
   for properties_key in storeFile storePassword keyAlias keyPassword
   do
-    properties_value=$(awk -F '\t' -v key="$properties_key" '$1 == key { print substr($0, index($0, "\t") + 1); found=1; exit } END { exit(found ? 0 : 1) }' "$properties_records" 2>/dev/null) || {
+    properties_value=$(awk -F '\t' -v key="$properties_key" '
+      $1 == key { value=substr($0, index($0, "\t") + 1); found=1 }
+      END { if (found) print value; exit(found ? 0 : 1) }
+    ' "$properties_records" 2>/dev/null) || {
       properties_error="properties file is missing $properties_key"
       return 1
     }

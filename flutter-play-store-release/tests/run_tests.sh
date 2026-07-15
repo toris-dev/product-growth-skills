@@ -6035,6 +6035,24 @@ STUB
     fail 'incomplete local key.properties did not become a warning'
   rm -f "$validator_project/android/key.properties"
 
+  printf '%s\n' \
+    "storeFile:$validator_signing_root/upload.jks" \
+    'storePassword:test-password' \
+    'keyAlias:upload' \
+    'keyPassword:test-key-password' > "$validator_project/android/key.properties"
+  release_validator_run 'colon-separated local properties were fabricated as ready' 0 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    APP_PACKAGE_NAME=com.example.kotlin "$VALIDATOR" --project "$validator_project"
+  grep -F 'WARN signing:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'colon-separated local properties did not match Fastlane doctor warning semantics'
+  release_validator_run 'deploy accepted colon-separated local properties' 1 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    APP_PACKAGE_NAME=com.example.kotlin "$VALIDATOR" --project "$validator_project" \
+    --context deploy
+  grep -F 'FAIL signing:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'colon-separated local properties did not match Fastlane deploy failure semantics'
+  rm -f "$validator_project/android/key.properties"
+
   release_validator_run 'complete raw signing inputs were rejected' 0 env "$validator_env" \
     FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
     ANDROID_KEYSTORE_PATH="$validator_signing_root/upload.jks" \

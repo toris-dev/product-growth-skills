@@ -5729,6 +5729,37 @@ release_validator_run() {
   }
 }
 
+release_validator_snapshot_tree() {
+  snapshot_root=$1
+  snapshot_output=$2
+  find "$snapshot_root" -print | LC_ALL=C sort | while IFS= read -r snapshot_path
+  do
+    snapshot_relative=${snapshot_path#$snapshot_root}
+    if [ -L "$snapshot_path" ]; then
+      printf 'L %s %s\n' "$snapshot_relative" "$(readlink "$snapshot_path")"
+    elif [ -d "$snapshot_path" ]; then
+      printf 'D %s %s\n' "$snapshot_relative" \
+        "$(stat -f '%Lp' "$snapshot_path" 2>/dev/null || stat -c '%a' "$snapshot_path")"
+    elif [ -f "$snapshot_path" ]; then
+      printf 'F %s %s %s\n' "$snapshot_relative" \
+        "$(stat -f '%Lp' "$snapshot_path" 2>/dev/null || stat -c '%a' "$snapshot_path")" \
+        "$(bootstrap_full_sha256 "$snapshot_path")"
+    else
+      printf 'O %s\n' "$snapshot_relative"
+    fi
+  done > "$snapshot_output"
+}
+
+release_validator_write_properties() {
+  properties_path=$1
+  properties_store_file=$2
+  printf '%s\n' \
+    "storeFile=$properties_store_file" \
+    'storePassword=test-password' \
+    'keyAlias=upload' \
+    'keyPassword=test-key-password' > "$properties_path"
+}
+
 release_validator() {
   VALIDATOR="$PACKAGE_ROOT/scripts/validate_release_setup.sh"
   VALIDATOR_ROOT="$TMP_ROOT/release validator"
@@ -5743,8 +5774,17 @@ release_validator() {
   "$PACKAGE_ROOT/scripts/bootstrap_android_fastlane.sh" --project "$validator_project" \
     >"$VALIDATOR_ROOT/bootstrap.stdout" 2>"$VALIDATOR_ROOT/bootstrap.stderr" ||
     fail 'could not create the validator fixture'
+  mkdir -p "$validator_project/.dart_tool/sentinel" \
+    "$validator_project/android/app/src/main/java/io/flutter/plugins" \
+    "$validator_project/generated-empty-directory"
+  printf 'locked dependencies\n' > "$validator_project/pubspec.lock"
+  printf '{"plugins":[],"date_created":"sentinel"}\n' \
+    > "$validator_project/.flutter-plugins-dependencies"
+  printf 'final class GeneratedPluginRegistrant {}\n' \
+    > "$validator_project/android/app/src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java"
+  printf 'dart tool sentinel\n' > "$validator_project/.dart_tool/sentinel/state"
 
-  for validator_tool in flutter ruby bundle java git curl gh fastlane
+  for validator_tool in flutter ruby bundle java git python3 curl gh fastlane
   do
     cat >"$validator_stubs/$validator_tool" <<'STUB'
 #!/usr/bin/env bash
@@ -5760,9 +5800,26 @@ case "$tool" in
     exit 0
     ;;
   ruby)
+    [ "${FPRS_RUBY_BROKEN-}" = 1 ] && exit 91
+    case " $* " in
+      *' -c '*) [ "${FPRS_RUBY_SYNTAX_FAIL-}" = 1 ] && exit 1 ;;
+      *' YAML.safe_load'*) [ "${FPRS_YAML_INVALID-}" = 1 ] && exit 1 ;;
+    esac
     case " $* " in
       *' require "yaml" '*) [ "${FPRS_NO_YAML_PARSER-}" = 1 ] && exit 1 ;;
     esac
+    exit 0
+    ;;
+  python3)
+    [ "${FPRS_PYTHON_BROKEN-}" = 1 ] && exit 92
+    printf '%s\n' "${FPRS_PYTHON_VERSION:-Python 3.13.5}"
+    exit 0
+    ;;
+  bundle)
+    [ "${FPRS_BUNDLER_BROKEN-}" = 1 ] && exit 93
+    if [ "${1-}" = --version ]; then
+      printf 'Bundler version %s\n' "${FPRS_BUNDLER_VERSION:-4.0.16}"
+    fi
     exit 0
     ;;
 esac
@@ -5773,10 +5830,7 @@ STUB
 
   validator_env="PATH=$validator_stubs:$PATH"
   : > "$validator_log"
-  find "$validator_project" -type f -print | LC_ALL=C sort | while IFS= read -r file
-  do
-    printf '%s  %s\n' "$(bootstrap_full_sha256 "$file")" "${file#$validator_project/}"
-  done > "$VALIDATOR_ROOT/before.sha256"
+  release_validator_snapshot_tree "$validator_project" "$VALIDATOR_ROOT/before.tree"
   release_validator_run 'read-only doctor failed' 0 env "$validator_env" \
     FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
     APP_PACKAGE_NAME=com.example.kotlin "$VALIDATOR" --project "$validator_project"
@@ -5786,14 +5840,209 @@ STUB
     fail 'doctor omitted the Fastlane-parity signing check name'
   grep -F 'WARN project.commands:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
     fail 'doctor did not report project commands as not run'
+  grep -F 'python3 --version' "$validator_log" >/dev/null 2>&1 ||
+    fail 'validator fabricated Python readiness without invoking its version check'
+  grep -F 'bundle --version' "$validator_log" >/dev/null 2>&1 ||
+    fail 'validator fabricated Bundler readiness without invoking its version check'
   ! grep -E 'flutter (pub get|analyze|test|build)' "$validator_log" >/dev/null 2>&1 ||
     fail 'doctor ran a project-mutating Flutter command'
-  find "$validator_project" -type f -print | LC_ALL=C sort | while IFS= read -r file
-  do
-    printf '%s  %s\n' "$(bootstrap_full_sha256 "$file")" "${file#$validator_project/}"
-  done > "$VALIDATOR_ROOT/after.sha256"
-  assert_same_file "$VALIDATOR_ROOT/before.sha256" "$VALIDATOR_ROOT/after.sha256" \
+  release_validator_snapshot_tree "$validator_project" "$VALIDATOR_ROOT/after.tree"
+  assert_same_file "$VALIDATOR_ROOT/before.tree" "$VALIDATOR_ROOT/after.tree" \
     'doctor changed the project tree'
+  cp "$VALIDATOR_STDOUT" "$VALIDATOR_ROOT/doctor.first"
+  release_validator_run 'repeated doctor failed' 0 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    APP_PACKAGE_NAME=com.example.kotlin "$VALIDATOR" --project "$validator_project"
+  assert_same_file "$VALIDATOR_ROOT/doctor.first" "$VALIDATOR_STDOUT" \
+    'repeated doctor output was not deterministic'
+  awk '{ name=$2; sub(/:$/, "", name); print name }' "$VALIDATOR_STDOUT" \
+    > "$VALIDATOR_ROOT/check-names"
+  LC_ALL=C sort "$VALIDATOR_ROOT/check-names" > "$VALIDATOR_ROOT/check-names.sorted"
+  assert_same_file "$VALIDATOR_ROOT/check-names.sorted" "$VALIDATOR_ROOT/check-names" \
+    'human validator checks were not sorted by stable name'
+
+  release_validator_run 'broken Python was fabricated as ready' 0 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    FPRS_PYTHON_BROKEN=1 APP_PACKAGE_NAME=com.example.kotlin \
+    "$VALIDATOR" --project "$validator_project"
+  grep -F 'WARN toolchain.python3:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'broken Python did not become an explicit warning'
+  release_validator_run 'wrong Bundler was fabricated as ready' 0 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    FPRS_BUNDLER_VERSION=3.6.9 APP_PACKAGE_NAME=com.example.kotlin \
+    "$VALIDATOR" --project "$validator_project"
+  grep -F 'WARN toolchain.bundler:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'wrong Bundler version did not become an explicit warning'
+  release_validator_run 'broken deploy prerequisites were not hard failures' 1 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    FPRS_PYTHON_BROKEN=1 FPRS_BUNDLER_BROKEN=1 \
+    "$VALIDATOR" --context deploy
+  grep -F 'FAIL toolchain.python3:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'broken Python was not a deploy-context failure'
+  grep -F 'FAIL toolchain.bundler:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'broken Bundler was not a deploy-context failure'
+
+  validator_no_ruby_bin="$VALIDATOR_ROOT/no-ruby-bin"
+  mkdir -p "$validator_no_ruby_bin"
+  for validator_system_tool in bash dirname mktemp rm sort awk sed grep stat shasum \
+    sha256sum tr cat
+  do
+    validator_system_path=$(command -v "$validator_system_tool" 2>/dev/null || true)
+    case "$validator_system_path" in
+      /*) ln -s "$validator_system_path" "$validator_no_ruby_bin/$validator_system_tool" ;;
+    esac
+  done
+  for validator_stub_tool in flutter bundle java git python3 curl gh fastlane
+  do
+    ln -s "$validator_stubs/$validator_stub_tool" \
+      "$validator_no_ruby_bin/$validator_stub_tool"
+  done
+  release_validator_run 'Ruby-absent package validation failed' 0 env \
+    PATH="$validator_no_ruby_bin" FPRS_COMMAND_LOG="$validator_log" \
+    FPRS_FORBIDDEN_MARKER="$validator_forbidden" "$VALIDATOR"
+  grep -F 'WARN toolchain.ruby:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'absent Ruby did not become an explicit warning'
+
+  validator_bad_shape="$VALIDATOR_ROOT/bad shape"
+  mkdir -p "$validator_bad_shape/android/app"
+  release_validator_run 'bad project shape was accepted' 1 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    "$VALIDATOR" --project "$validator_bad_shape"
+  grep -F 'FAIL project.shape:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'bad project shape did not emit its named failure'
+  grep -F 'FAIL project.inspection:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'failed inspection did not emit its named failure'
+
+  mv "$validator_project/android/fastlane/Appfile" "$VALIDATOR_ROOT/Appfile.saved"
+  release_validator_run 'missing required generated file was accepted' 1 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    APP_PACKAGE_NAME=com.example.kotlin "$VALIDATOR" --project "$validator_project"
+  grep -F 'FAIL fastlane.files:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'missing generated file did not emit fastlane.files'
+  mv "$VALIDATOR_ROOT/Appfile.saved" "$validator_project/android/fastlane/Appfile"
+
+  cp "$validator_project/android/fastlane/Appfile" "$VALIDATOR_ROOT/Appfile.good"
+  printf '\n# corrupt owned body\n' >> "$validator_project/android/fastlane/Appfile"
+  release_validator_run 'corrupt managed hash was accepted' 1 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    APP_PACKAGE_NAME=com.example.kotlin "$VALIDATOR" --project "$validator_project"
+  grep -F 'FAIL ownership.hashes:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'corrupt managed hash did not emit ownership.hashes'
+  cp "$VALIDATOR_ROOT/Appfile.good" "$validator_project/android/fastlane/Appfile"
+
+  cp "$validator_project/.gitignore" "$VALIDATOR_ROOT/examples-ignore.good"
+  printf 'android/key.properties.example\n' >> "$validator_project/.gitignore"
+  release_validator_run 'ignored example file was accepted' 1 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    APP_PACKAGE_NAME=com.example.kotlin "$VALIDATOR" --project "$validator_project"
+  grep -F 'FAIL gitignore.required:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'example-file ignore exception did not fail'
+  cp "$VALIDATOR_ROOT/examples-ignore.good" "$validator_project/.gitignore"
+
+  release_validator_run 'Ruby syntax failure was accepted' 1 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    FPRS_RUBY_SYNTAX_FAIL=1 APP_PACKAGE_NAME=com.example.kotlin \
+    "$VALIDATOR" --project "$validator_project"
+  grep -F 'FAIL ruby.syntax:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'Ruby syntax failure did not emit ruby.syntax'
+
+  cp "$validator_project/tool/flutter-play-store-release/decode_secret.sh" \
+    "$VALIDATOR_ROOT/decode.good"
+  printf '\nif then\n' >> "$validator_project/tool/flutter-play-store-release/decode_secret.sh"
+  release_validator_run 'generated shell syntax failure was accepted' 1 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    APP_PACKAGE_NAME=com.example.kotlin "$VALIDATOR" --project "$validator_project"
+  grep -F 'FAIL shell.project:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'generated shell syntax failure did not emit shell.project'
+  cp "$VALIDATOR_ROOT/decode.good" \
+    "$validator_project/tool/flutter-play-store-release/decode_secret.sh"
+
+  release_validator_run 'parser-present invalid YAML was accepted' 1 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    FPRS_YAML_INVALID=1 APP_PACKAGE_NAME=com.example.kotlin \
+    "$VALIDATOR" --project "$validator_project"
+  grep -F 'FAIL yaml.parser:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'parser-present invalid YAML did not emit yaml.parser'
+
+  validator_signing_root="$VALIDATOR_ROOT/private-signing"
+  mkdir -p "$validator_signing_root"
+  chmod 700 "$validator_signing_root"
+  printf 'keystore bytes\n' > "$validator_signing_root/upload.jks"
+  validator_valid_properties="$validator_signing_root/key.properties"
+  release_validator_write_properties "$validator_valid_properties" \
+    "$validator_signing_root/upload.jks"
+  chmod 600 "$validator_valid_properties"
+  release_validator_run 'valid private signing override was rejected' 0 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    ANDROID_KEY_PROPERTIES_PATH="$validator_valid_properties" \
+    APP_PACKAGE_NAME=com.example.kotlin "$VALIDATOR" --project "$validator_project"
+  grep -F 'PASS signing:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'valid private signing override did not pass signing'
+
+  validator_incomplete_properties="$validator_signing_root/incomplete.properties"
+  printf 'storeFile=%s\n' "$validator_signing_root/upload.jks" \
+    > "$validator_incomplete_properties"
+  chmod 600 "$validator_incomplete_properties"
+  release_validator_run 'incomplete explicit signing override was accepted' 1 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    ANDROID_KEY_PROPERTIES_PATH="$validator_incomplete_properties" \
+    APP_PACKAGE_NAME=com.example.kotlin "$VALIDATOR" --project "$validator_project"
+  grep -F 'FAIL signing:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'incomplete explicit signing override did not fail'
+
+  validator_mode_properties="$validator_signing_root/mode.properties"
+  release_validator_write_properties "$validator_mode_properties" \
+    "$validator_signing_root/upload.jks"
+  chmod 644 "$validator_mode_properties"
+  release_validator_run 'public-mode signing override was accepted' 1 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    ANDROID_KEY_PROPERTIES_PATH="$validator_mode_properties" \
+    APP_PACKAGE_NAME=com.example.kotlin "$VALIDATOR" --project "$validator_project"
+
+  validator_relative_properties="$validator_signing_root/relative.properties"
+  release_validator_write_properties "$validator_relative_properties" 'upload.jks'
+  chmod 600 "$validator_relative_properties"
+  release_validator_run 'relative override storeFile was accepted' 1 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    ANDROID_KEY_PROPERTIES_PATH="$validator_relative_properties" \
+    APP_PACKAGE_NAME=com.example.kotlin "$VALIDATOR" --project "$validator_project"
+
+  validator_missing_properties="$validator_signing_root/missing.properties"
+  release_validator_write_properties "$validator_missing_properties" \
+    "$validator_signing_root/missing.jks"
+  chmod 600 "$validator_missing_properties"
+  release_validator_run 'missing override keystore was accepted' 1 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    ANDROID_KEY_PROPERTIES_PATH="$validator_missing_properties" \
+    APP_PACKAGE_NAME=com.example.kotlin "$VALIDATOR" --project "$validator_project"
+
+  release_validator_write_properties "$validator_project/android/key.properties" \
+    "$validator_signing_root/upload.jks"
+  release_validator_run 'CI workspace key.properties was accepted' 1 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    CI=true APP_PACKAGE_NAME=com.example.kotlin \
+    "$VALIDATOR" --project "$validator_project"
+  grep -F 'FAIL signing:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'CI workspace key.properties did not fail signing'
+  rm -f "$validator_project/android/key.properties"
+
+  printf 'storeFile=%s\n' "$validator_signing_root/upload.jks" \
+    > "$validator_project/android/key.properties"
+  release_validator_run 'incomplete local signing was fabricated as ready' 0 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    APP_PACKAGE_NAME=com.example.kotlin "$VALIDATOR" --project "$validator_project"
+  grep -F 'WARN signing:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'incomplete local key.properties did not become a warning'
+  rm -f "$validator_project/android/key.properties"
+
+  release_validator_run 'complete raw signing inputs were rejected' 0 env "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    ANDROID_KEYSTORE_PATH="$validator_signing_root/upload.jks" \
+    ANDROID_KEYSTORE_PASSWORD=test-password ANDROID_KEY_ALIAS=upload \
+    ANDROID_KEY_PASSWORD=test-key-password APP_PACKAGE_NAME=com.example.kotlin \
+    "$VALIDATOR" --project "$validator_project"
+  grep -F 'PASS signing:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'complete raw signing inputs did not pass signing'
 
   validator_groovy="$VALIDATOR_ROOT/groovy project"
   inspection_write_pubspec "$validator_groovy" dev_dependencies

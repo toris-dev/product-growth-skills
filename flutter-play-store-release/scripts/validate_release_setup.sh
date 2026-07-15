@@ -168,6 +168,98 @@ fprs_validator_active_text() {
   ' "$1"
 }
 
+fprs_validator_parse_properties() {
+  properties_source=$1
+  properties_output=$2
+  awk '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    function separator(value, index_value, character, escaped) {
+      escaped = 0
+      for (index_value = 1; index_value <= length(value); index_value++) {
+        character = substr(value, index_value, 1)
+        if (escaped) { escaped = 0; continue }
+        if (character == "\\") { escaped = 1; continue }
+        if (character == "=" || character == ":") return index_value
+      }
+      return 0
+    }
+    /^[[:space:]]*($|#|!)/ { next }
+    {
+      split_at = separator($0)
+      if (!split_at) exit 2
+      key = trim(substr($0, 1, split_at - 1))
+      value = substr($0, split_at + 1)
+      sub(/^[[:space:]]+/, "", value)
+      if (key == "" || seen[key]++) exit 2
+      print key "\t" value
+    }
+  ' "$properties_source" > "$properties_output"
+}
+
+fprs_validator_check_properties() {
+  properties_path=$1
+  properties_kind=$2
+  case "$properties_path" in /*) ;; *) properties_path="$PWD/$properties_path" ;; esac
+  properties_error=
+  properties_records="$validator_tmp/properties.$$.tsv"
+  if ! fprs_validator_file_safe "$properties_path"; then
+    properties_error='properties file is not a safe regular file'
+    return 1
+  fi
+  if [ "$properties_kind" = override ]; then
+    properties_mode=$(fprs_file_mode "$properties_path" 2>/dev/null || true)
+    properties_parent=${properties_path%/*}
+    [ -n "$properties_parent" ] || properties_parent=.
+    properties_parent_mode=$(fprs_file_mode "$properties_parent" 2>/dev/null || true)
+    if [ "$properties_mode" != 600 ]; then
+      properties_error='ANDROID_KEY_PROPERTIES_PATH must have mode 0600'
+      return 1
+    fi
+    if [ ! -d "$properties_parent" ] || [ -L "$properties_parent" ] || \
+      [ "$properties_parent_mode" != 700 ]; then
+      properties_error='ANDROID_KEY_PROPERTIES_PATH parent must be a non-symlink mode-0700 directory'
+      return 1
+    fi
+  fi
+  if ! fprs_validator_parse_properties "$properties_path" "$properties_records"; then
+    properties_error='properties file is malformed or contains duplicate keys'
+    return 1
+  fi
+  for properties_key in storeFile storePassword keyAlias keyPassword
+  do
+    properties_value=$(awk -F '\t' -v key="$properties_key" '$1 == key { print substr($0, index($0, "\t") + 1); found=1; exit } END { exit(found ? 0 : 1) }' "$properties_records" 2>/dev/null) || {
+      properties_error="properties file is missing $properties_key"
+      return 1
+    }
+    [ -n "$properties_value" ] || {
+      properties_error="properties file has an empty $properties_key"
+      return 1
+    }
+    [ "$properties_key" = storeFile ] && properties_store_file=$properties_value
+  done
+  properties_store_file=$(printf '%s\n' "$properties_store_file" | \
+    sed 's/\\ / /g; s/\\:/:/g; s/\\=/=/g; s/\\\\/\\/g')
+  case "$properties_store_file" in
+    /*) properties_resolved_store=$properties_store_file ;;
+    *)
+      if [ "$properties_kind" = override ]; then
+        properties_error='ANDROID_KEY_PROPERTIES_PATH storeFile must be absolute'
+        return 1
+      fi
+      properties_resolved_store="$project_root/android/app/$properties_store_file"
+      ;;
+  esac
+  if ! fprs_validator_file_safe "$properties_resolved_store" || [ ! -s "$properties_resolved_store" ]; then
+    properties_error='storeFile must resolve to a nonempty regular keystore'
+    return 1
+  fi
+  return 0
+}
+
 fprs_validator_shell_syntax() {
   validator_shell_failed=
   for validator_shell in \
@@ -199,10 +291,13 @@ fprs_validator_shell_syntax() {
 
 fprs_validator_shell_syntax
 
-if command -v python3 >/dev/null 2>&1; then
-  fprs_validator_add PASS toolchain.python3 'Python 3 is available for transactional bootstrap helpers'
+if command -v python3 >/dev/null 2>&1 && \
+  python_version_output=$(python3 --version 2>&1) && \
+  printf '%s\n' "$python_version_output" | grep -E '^Python 3\.[0-9]+([.][0-9]+)?([[:space:]].*)?$' >/dev/null 2>&1
+then
+  fprs_validator_add PASS toolchain.python3 'Python 3 passed its read-only version check'
 else
-  fprs_validator_add WARN toolchain.python3 'Python 3 is unavailable; bootstrap and safe file publication cannot run' 'python3 --version'
+  fprs_validator_add "$(fprs_validator_context_level)" toolchain.python3 'Python 3 is unavailable or its version check failed; bootstrap and safe file publication cannot run' 'python3 --version'
 fi
 
 if command -v java >/dev/null 2>&1; then
@@ -229,10 +324,13 @@ else
   fprs_validator_add "$(fprs_validator_context_level)" toolchain.ruby 'Ruby is unavailable' 'ruby --version'
 fi
 
-if command -v bundle >/dev/null 2>&1; then
-  fprs_validator_add PASS toolchain.bundler 'Bundler is available'
+if command -v bundle >/dev/null 2>&1 && \
+  bundler_version_output=$(bundle --version 2>&1) && \
+  [ "$bundler_version_output" = 'Bundler version 4.0.16' ]
+then
+  fprs_validator_add PASS toolchain.bundler 'Bundler 4.0.16 matches the approved lockfile baseline'
 else
-  fprs_validator_add "$(fprs_validator_context_level)" toolchain.bundler 'Bundler is unavailable' 'gem install bundler -v 4.0.16'
+  fprs_validator_add "$(fprs_validator_context_level)" toolchain.bundler 'Bundler 4.0.16 is unavailable, broken, or mismatched' 'gem install bundler -v 4.0.16'
 fi
 
 if command -v flutter >/dev/null 2>&1; then
@@ -586,20 +684,64 @@ IGNORES
       *) fprs_validator_add PASS track 'Play track is configured' ;;
     esac
 
-    signing_inputs=false
-    if [ -n "${ANDROID_KEY_PROPERTIES_PATH-}" ] && fprs_validator_file_safe "$ANDROID_KEY_PROPERTIES_PATH"; then
-      signing_inputs=true
-    elif { [ -n "${ANDROID_KEYSTORE_PATH-}" ] || [ -n "${ANDROID_KEYSTORE_BASE64-}" ]; } && \
-      [ -n "${ANDROID_KEYSTORE_PASSWORD-}" ] && [ -n "${ANDROID_KEY_ALIAS-}" ] && [ -n "${ANDROID_KEY_PASSWORD-}" ]; then
-      signing_inputs=true
-    elif fprs_validator_file_safe "$project_root/android/key.properties"; then
-      signing_inputs=true
+    workspace_properties="$project_root/android/key.properties"
+    signing_ci=false
+    if fprs_is_truthy "${CI-}" || fprs_is_truthy "${GITHUB_ACTIONS-}"; then
+      signing_ci=true
     fi
-    if [ "$signing_inputs" = true ]; then
-      fprs_validator_add PASS signing 'Android release signing input is available'
+    signing_level=
+    signing_message=
+    signing_command=-
+    if [ "$signing_ci" = true ] && { [ -e "$workspace_properties" ] || [ -L "$workspace_properties" ]; }; then
+      signing_level=FAIL
+      signing_message='CI refuses workspace android/key.properties; use a private temporary override or complete raw inputs'
+      signing_command='rm android/key.properties'
+    elif [ -n "${ANDROID_KEY_PROPERTIES_PATH-}" ]; then
+      if fprs_validator_check_properties "$ANDROID_KEY_PROPERTIES_PATH" override; then
+        signing_level=PASS
+        signing_message='Private Android key-properties override is complete and valid'
+      else
+        signing_level=FAIL
+        signing_message="Explicit Android key-properties override is invalid: $properties_error"
+        signing_command='chmod 600 "$ANDROID_KEY_PROPERTIES_PATH"'
+      fi
     else
-      fprs_validator_add "$(fprs_validator_context_level)" signing 'Android release signing input is incomplete' 'cp android/key.properties.example android/key.properties'
+      signing_any_raw=false
+      if [ -n "${ANDROID_KEYSTORE_PATH-}" ] || [ -n "${ANDROID_KEYSTORE_BASE64-}" ] || \
+        [ -n "${ANDROID_KEYSTORE_PASSWORD-}" ] || [ -n "${ANDROID_KEY_ALIAS-}" ] || \
+        [ -n "${ANDROID_KEY_PASSWORD-}" ]; then
+        signing_any_raw=true
+      fi
+      if [ "$signing_any_raw" = true ]; then
+        if { [ -n "${ANDROID_KEYSTORE_PATH-}" ] || [ -n "${ANDROID_KEYSTORE_BASE64-}" ]; } && \
+          [ -n "${ANDROID_KEYSTORE_PASSWORD-}" ] && [ -n "${ANDROID_KEY_ALIAS-}" ] && \
+          [ -n "${ANDROID_KEY_PASSWORD-}" ] && \
+          { [ -z "${ANDROID_KEYSTORE_PATH-}" ] || \
+            { fprs_validator_file_safe "$ANDROID_KEYSTORE_PATH" && [ -s "$ANDROID_KEYSTORE_PATH" ]; }; }
+        then
+          signing_level=PASS
+          signing_message='Complete raw Android signing inputs are available'
+        else
+          signing_level=FAIL
+          signing_message='Explicit raw Android signing inputs are incomplete or the keystore path is invalid'
+          signing_command='export ANDROID_KEYSTORE_PATH=/absolute/path/upload.jks'
+        fi
+      elif [ "$signing_ci" = false ] && { [ -e "$workspace_properties" ] || [ -L "$workspace_properties" ]; }; then
+        if fprs_validator_check_properties "$workspace_properties" local; then
+          signing_level=PASS
+          signing_message='Local android/key.properties is complete and its keystore exists'
+        else
+          signing_level=$(fprs_validator_context_level)
+          signing_message="Local android/key.properties is incomplete or invalid: $properties_error"
+          signing_command='cp android/key.properties.example android/key.properties'
+        fi
+      else
+        signing_level=$(fprs_validator_context_level)
+        signing_message='Android release signing input is incomplete'
+        signing_command='cp android/key.properties.example android/key.properties'
+      fi
     fi
+    fprs_validator_add "$signing_level" signing "$signing_message" "$signing_command"
 
     target=${DISTRIBUTION_TARGET:-play-store}
     case "$target" in

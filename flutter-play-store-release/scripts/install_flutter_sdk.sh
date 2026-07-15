@@ -227,6 +227,8 @@ if not hasattr(tarfile, "data_filter"):
 def normalized_member(name):
     if not isinstance(name, str) or not name or "\\" in name or "\0" in name or name.startswith("/"):
         raise ValueError("absolute or malformed archive member")
+    if any(component in (".", "..") for component in name.split("/")):
+        raise ValueError("raw archive member contains a dot path component")
     value = posixpath.normpath(name)
     if value in ("", ".", "..") or value.startswith("../"):
         raise ValueError("archive member escapes extraction root")
@@ -238,6 +240,8 @@ def contained_link(member, normalized):
     target = member.linkname
     if not target or "\\" in target or "\0" in target or target.startswith("/"):
         raise ValueError("absolute or malformed archive link")
+    if any(component in (".", "..") for component in target.split("/")):
+        raise ValueError("raw archive link contains a dot path component")
     if member.issym():
         resolved = posixpath.normpath(posixpath.join(posixpath.dirname(normalized), target))
     else:

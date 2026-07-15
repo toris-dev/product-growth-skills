@@ -4746,6 +4746,11 @@ with tarfile.open(path, "w:xz", format=tarfile.PAX_FORMAT) as tf:
         add(tf, "flutter/../../parent-escape", b"bad")
     elif kind == "duplicate":
         add(tf, "flutter/bin/../bin/flutter", b"duplicate")
+    elif kind == "contained-parent":
+        add(tf, "flutter/tmp/../bin/tool", b"normalizes inside flutter")
+    elif kind == "contained-link-parent":
+        add(tf, "flutter/safe-link", kind_override=tarfile.SYMTYPE,
+            linkname="tmp/../bin/tool", mode=0o777)
     elif kind == "symlink":
         add(tf, "flutter/escape", kind_override=tarfile.SYMTYPE,
             linkname="../../escape", mode=0o777)
@@ -4877,7 +4882,8 @@ flutter_sdk_installer() {
     --version 3.38.1 --channel stable --architecture x64 \
     --destination "$INSTALLER_ROOT/partial-sdk" --manifest-url "file://$manifest"
 
-  for hostile_kind in absolute parent duplicate symlink hardlink fifo device socket setuid unsafe-owner
+  for hostile_kind in absolute parent duplicate contained-parent contained-link-parent \
+    symlink hardlink fifo device socket setuid unsafe-owner
   do
     hostile_archive=$INSTALLER_ROOT/releases/stable/linux/$hostile_kind.tar.xz
     installer_make_archive "$hostile_archive" "$hostile_kind"
@@ -4944,6 +4950,8 @@ flutter_sdk_installer() {
 
 workflow_template() {
   workflow=$PACKAGE_ROOT/templates/release-android.yml
+  workflow_harness=$TMP_ROOT/workflow-harness
+  mkdir -p "$workflow_harness"
   for required_text in \
     'types: [published]' \
     'workflow_dispatch:' \
@@ -4982,42 +4990,263 @@ workflow_template() {
     fail 'workflow does not install the x64 Flutter archive explicitly'
   ! grep -E 'uses:[[:space:]]+[^#]*(flutter-action|fastlane-action)' "$workflow" >/dev/null 2>&1 ||
     fail 'workflow uses a third-party Flutter or Fastlane wrapper action'
-  python3 - "$workflow" <<'PY'
-import re, sys
-text = open(sys.argv[1], encoding="utf-8").read()
-refs = re.findall(r"^\s*uses:\s*([^\s#]+)", text, re.M)
-bad = [ref for ref in refs if not (ref.startswith("./") or re.fullmatch(r"[^@]+@[0-9a-f]{40}", ref))]
-if bad:
-    raise SystemExit("mutable action refs: " + repr(bad))
-for action in ("actions/checkout", "actions/setup-java", "ruby/setup-ruby"):
-    if len([ref for ref in refs if ref.startswith(action + "@")]) != 1:
-        raise SystemExit("missing or duplicate baseline action: " + action)
-run_blocks = re.findall(r"^\s*run:\s*\|[^\n]*\n((?:\s{8,}.*\n?)*)", text, re.M)
-for block in run_blocks:
-    if re.search(r"\$\{\{\s*(?:inputs\.|github\.event\.|github\.ref|github\.sha)", block):
-        raise SystemExit("untrusted GitHub expression interpolated in run block")
-if re.search(r"^\s*if:\s*\$\{\{\s*secrets\.", text, re.M):
-    raise SystemExit("secret used directly in if expression")
-for canary in ("version_name", "track", "release_status", "distribution_target", "firebase_release_notes"):
-    if not re.search(r"^\s+" + canary.upper() + r":\s*\$\{\{\s*inputs\." + canary, text, re.M):
-        raise SystemExit("missing step-local untrusted input mapping: " + canary)
-PY
-  ruby -e 'require "yaml"; YAML.parse_file(ARGV.fetch(0))' "$workflow" >/dev/null ||
-    fail 'workflow is not valid YAML'
-  [ "$(grep -c 'SLACK_WEBHOOK_URL:.*secrets.SLACK_WEBHOOK_URL' "$workflow")" -eq 1 ] ||
-    fail 'Slack webhook does not have exactly one workflow owner'
-  [ "$(grep -c 'ANDROID_KEYSTORE_BASE64:.*secrets.ANDROID_KEYSTORE_BASE64' "$workflow")" -eq 1 ] ||
-    fail 'keystore Base64 secret is not scoped to exactly one decode step'
-  [ "$(grep -c 'GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64:.*secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64' "$workflow")" -eq 1 ] ||
-    fail 'Play JSON secret is not scoped to exactly one decode step'
-  [ "$(grep -c 'FIREBASE_SERVICE_ACCOUNT_JSON_BASE64:.*secrets.FIREBASE_SERVICE_ACCOUNT_JSON_BASE64' "$workflow")" -eq 1 ] ||
-    fail 'Firebase JSON secret is not scoped to exactly one decode step'
+  if ! ruby -ryaml - "$workflow" "$workflow_harness" <<'RUBY'
+require "fileutils"
+
+workflow_path, harness_root = ARGV
+document = YAML.safe_load(File.read(workflow_path), aliases: false)
+raise "workflow root is not a mapping" unless document.is_a?(Hash)
+events = document["on"] || document[true]
+raise "release published trigger is missing" unless events.dig("release", "types") == ["published"]
+dispatch = events.fetch("workflow_dispatch").fetch("inputs")
+expected_inputs = {
+  "version_name" => "string", "flutter_version" => "string", "track" => "choice",
+  "release_status" => "choice", "run_tests" => "boolean",
+  "distribution_target" => "choice", "firebase_artifact_type" => "choice",
+  "firebase_release_notes" => "string", "confirm_firebase_package_match" => "boolean",
+  "confirm_firebase_aab_play_linked" => "boolean", "confirm_production" => "boolean"
+}
+raise "manual inputs differ from the contract" unless dispatch.keys.sort == expected_inputs.keys.sort
+expected_inputs.each do |name, type|
+  raise "manual input #{name} has wrong type" unless dispatch.fetch(name).fetch("type") == type
+end
+raise "custom mutable ref input is forbidden" if dispatch.key?("ref")
+raise "permissions are not contents-read only" unless document["permissions"] == {"contents" => "read"}
+concurrency = document.fetch("concurrency")
+raise "repository-wide concurrency is wrong" unless concurrency == {
+  "group" => "play-store-release", "cancel-in-progress" => false, "queue" => "max"
+}
+
+jobs = document.fetch("jobs")
+raise "preflight unexpectedly has an Environment" if jobs.fetch("preflight").key?("environment")
+release_job = jobs.fetch("release")
+raise "release Environment is not the fixed preflight output" unless
+  release_job.fetch("environment") == "${{ needs.preflight.outputs.deployment_environment }}"
+steps = release_job.fetch("steps")
+by_name = steps.to_h { |step| [step.fetch("name"), step] }
+checkout = by_name.fetch("Checkout immutable event commit")
+raise "checkout is not bound to github.sha" unless checkout.fetch("with").fetch("ref") == "${{ github.sha }}"
+
+uses = steps.map { |step| step["uses"] }.compact
+bad_uses = uses.reject { |ref| ref.start_with?("./") || ref.match?(/\A[^@]+@[0-9a-f]{40}\z/) }
+raise "mutable action refs: #{bad_uses.inspect}" unless bad_uses.empty?
+%w[actions/checkout actions/setup-java ruby/setup-ruby].each do |action|
+  raise "missing or duplicate baseline action: #{action}" unless uses.count { |ref| ref.start_with?("#{action}@") } == 1
+end
+
+steps.each do |step|
+  run = step["run"].to_s
+  if run.match?(/\$\{\{\s*(?:inputs\.|github\.event\.|github\.ref|github\.sha)/)
+    raise "untrusted expression interpolated in run step: #{step.fetch("name")}"
+  end
+  if step["if"].to_s.match?(/secrets\./)
+    raise "secret used in step condition: #{step.fetch("name")}"
+  end
+end
+
+validation = by_name.fetch("Validate source, release tag, and every untrusted input")
+validation_env = validation.fetch("env")
+expected_mappings = {
+  "VERSION_NAME" => "inputs.version_name", "TRACK" => "inputs.track",
+  "RELEASE_STATUS" => "inputs.release_status", "DISTRIBUTION_TARGET" => "inputs.distribution_target",
+  "RELEASE_TAG" => "github.event.release.tag_name",
+  "FIREBASE_RELEASE_NOTES" => "inputs.firebase_release_notes"
+}
+expected_mappings.each do |name, expression|
+  raise "missing step-local mapping for #{name}" unless validation_env.fetch(name).include?(expression)
+end
+
+secret_uses = Hash.new { |hash, key| hash[key] = [] }
+steps.each do |step|
+  step.fetch("env", {}).each do |name, value|
+    value.to_s.scan(/secrets\.([A-Z0-9_]+)/).flatten.each do |secret|
+      secret_uses[secret] << [step.fetch("name"), name]
+    end
+  end
+  %w[run if with].each do |field|
+    raise "secret escaped step env in #{step.fetch("name")}: #{field}" if step[field].to_s.include?("secrets.")
+  end
+end
+expected_secret_steps = {
+  "APP_PACKAGE_NAME" => ["Restore only target-required credentials and signing material"],
+  "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64" => ["Restore only target-required credentials and signing material"],
+  "FIREBASE_SERVICE_ACCOUNT_JSON_BASE64" => ["Restore only target-required credentials and signing material"],
+  "ANDROID_KEYSTORE_BASE64" => ["Restore only target-required credentials and signing material"],
+  "ANDROID_KEYSTORE_PASSWORD" => ["Restore only target-required credentials and signing material"],
+  "ANDROID_KEY_ALIAS" => ["Restore only target-required credentials and signing material"],
+  "ANDROID_KEY_PASSWORD" => ["Restore only target-required credentials and signing material"],
+  "FIREBASE_APP_ID" => ["Run local Fastlane release doctor", "Release one routed Android artifact"],
+  "FIREBASE_TESTER_GROUPS" => ["Release one routed Android artifact"],
+  "FIREBASE_TESTERS" => ["Release one routed Android artifact"],
+  "SLACK_WEBHOOK_URL" => ["Send the single optional Slack notification"]
+}
+raise "workflow secret set differs from contract" unless secret_uses.keys.sort == expected_secret_steps.keys.sort
+expected_secret_steps.each do |secret, expected_steps|
+  actual_steps = secret_uses.fetch(secret).map(&:first)
+  raise "wrong step scope for #{secret}: #{actual_steps.inspect}" unless actual_steps == expected_steps
+end
+raw_names = expected_secret_steps.keys.grep(/BASE64|PASSWORD|KEY_ALIAS|APP_PACKAGE_NAME/)
+release_env = by_name.fetch("Release one routed Android artifact").fetch("env")
+raise "raw secret reached release step" unless (release_env.keys & raw_names).empty?
+jobs.each_value do |job|
+  raise "job-level raw secret environment" if job.fetch("env", {}).values.any? { |value| value.to_s.include?("secrets.") }
+end
+
+{
+  "preflight.sh" => jobs.fetch("preflight").fetch("steps").find { |step|
+    step.fetch("name") == "Validate dispatch policy and route a fixed Environment"
+  }.fetch("run"),
+  "validate.sh" => validation.fetch("run")
+}.each do |name, body|
+  path = File.join(harness_root, name)
+  File.write(path, body, mode: "wx", perm: 0o700)
+end
+RUBY
+  then
+    fail 'workflow structural contract failed'
+  fi
   grep -F '[ -e android/key.properties ]' "$workflow" >/dev/null 2>&1 ||
     fail 'workflow does not preserve a pre-existing project key.properties'
   grep -F 'java_properties_escape' "$workflow" >/dev/null 2>&1 ||
     fail 'workflow does not escape Java properties values'
   ! grep -E '(GITHUB_OUTPUT|GITHUB_STEP_SUMMARY).*(BASE64|PASSWORD|WEBHOOK|KEY_ALIAS)' "$workflow" >/dev/null 2>&1 ||
     fail 'workflow writes secret material to an output or summary'
+
+  workflow_run_counter=0
+  workflow_run_expect() {
+    workflow_run_description=$1
+    workflow_run_expected=$2
+    workflow_run_directory=$3
+    workflow_run_script=$4
+    shift 4
+    workflow_run_counter=$((workflow_run_counter + 1))
+    set +e
+    (
+      CDPATH= cd -- "$workflow_run_directory" &&
+        env "$@" bash "$workflow_run_script"
+    ) >"$workflow_harness/run-$workflow_run_counter.stdout" \
+      2>"$workflow_harness/run-$workflow_run_counter.stderr"
+    workflow_run_status=$?
+    set -e
+    if [ "$workflow_run_expected" -eq 0 ]; then
+      [ "$workflow_run_status" -eq 0 ] || {
+        cat "$workflow_harness/run-$workflow_run_counter.stderr" >&2
+        fail "$workflow_run_description (expected success, got $workflow_run_status)"
+      }
+    else
+      [ "$workflow_run_status" -ne 0 ] ||
+        fail "$workflow_run_description (unexpected success)"
+    fi
+  }
+
+  workflow_gate_case() {
+    workflow_gate_description=$1
+    workflow_gate_expected=$2
+    workflow_gate_route=$3
+    workflow_gate_event=$4
+    workflow_gate_track=$5
+    workflow_gate_confirm=$6
+    workflow_gate_output=$workflow_harness/gate-$workflow_run_counter.output
+    workflow_run_expect "$workflow_gate_description" "$workflow_gate_expected" \
+      "$workflow_harness" "$workflow_harness/preflight.sh" \
+      GITHUB_OUTPUT="$workflow_gate_output" EVENT_NAME="$workflow_gate_event" \
+      VERSION_NAME=v1.2.3 FLUTTER_VERSION=3.38.1 TRACK="$workflow_gate_track" \
+      RELEASE_STATUS=completed RUN_TESTS=true DISTRIBUTION_TARGET=play-store \
+      FIREBASE_ARTIFACT_TYPE=AAB FIREBASE_RELEASE_NOTES=notes \
+      CONFIRM_FIREBASE_PACKAGE_MATCH=false CONFIRM_FIREBASE_AAB_PLAY_LINKED=false \
+      CONFIRM_PRODUCTION="$workflow_gate_confirm"
+    if [ "$workflow_gate_expected" -eq 0 ]; then
+      grep -Fx "deployment_environment=$workflow_gate_route" "$workflow_gate_output" >/dev/null 2>&1 ||
+        fail "$workflow_gate_description did not select $workflow_gate_route"
+    else
+      [ ! -e "$workflow_gate_output" ] || [ ! -s "$workflow_gate_output" ] ||
+        fail "$workflow_gate_description emitted an Environment after rejection"
+    fi
+  }
+
+  workflow_gate_case 'release routing failed' 0 play-store-nonproduction release internal false
+  workflow_gate_case 'nonproduction manual routing failed' 0 play-store-nonproduction workflow_dispatch beta false
+  workflow_gate_case 'unconfirmed production was accepted' 1 '' workflow_dispatch production false
+  workflow_gate_case 'confirmed production routing failed' 0 play-store-production workflow_dispatch production true
+
+  workflow_repo=$workflow_harness/repository
+  mkdir -p "$workflow_repo"
+  git -C "$workflow_repo" init -q
+  git -C "$workflow_repo" config user.email tests@example.invalid
+  git -C "$workflow_repo" config user.name 'Workflow Tests'
+  printf 'old\n' > "$workflow_repo/state.txt"
+  git -C "$workflow_repo" add state.txt
+  git -C "$workflow_repo" commit -q -m old
+  workflow_old_sha=$(git -C "$workflow_repo" rev-parse HEAD)
+  printf 'current\n' > "$workflow_repo/state.txt"
+  git -C "$workflow_repo" add state.txt
+  git -C "$workflow_repo" commit -q -m current
+  workflow_head_sha=$(git -C "$workflow_repo" rev-parse HEAD)
+  git -C "$workflow_repo" tag v1.2.3 "$workflow_head_sha"
+  git -C "$workflow_repo" tag -a v1.2.4 -m annotated "$workflow_head_sha"
+  git -C "$workflow_repo" tag v1.2.5 "$workflow_old_sha"
+  git -C "$workflow_repo" tag v1.2.6 "$workflow_head_sha"
+  git -C "$workflow_repo" tag -f v1.2.6 "$workflow_old_sha" >/dev/null
+
+  workflow_validate_case() {
+    workflow_validate_description=$1
+    workflow_validate_expected=$2
+    workflow_validate_event=$3
+    workflow_validate_tag=$4
+    workflow_validate_version=$5
+    workflow_validate_track=$6
+    workflow_validate_status=$7
+    workflow_validate_target=$8
+    workflow_validate_notes=$9
+    workflow_validate_root=$workflow_harness/validate-$workflow_run_counter
+    mkdir -p "$workflow_validate_root"
+    workflow_run_expect "$workflow_validate_description" "$workflow_validate_expected" \
+      "$workflow_repo" "$workflow_harness/validate.sh" \
+      RUNNER_TEMP="$workflow_validate_root" EVENT_NAME="$workflow_validate_event" \
+      RELEASE_TAG="$workflow_validate_tag" VERSION_NAME="$workflow_validate_version" \
+      FLUTTER_VERSION=3.38.1 REPOSITORY_FLUTTER_VERSION= \
+      TRACK="$workflow_validate_track" RELEASE_STATUS="$workflow_validate_status" \
+      RUN_TESTS=true DISTRIBUTION_TARGET="$workflow_validate_target" \
+      FIREBASE_ARTIFACT_TYPE=AAB FIREBASE_RELEASE_NOTES="$workflow_validate_notes" \
+      CONFIRM_FIREBASE_PACKAGE_MATCH=false CONFIRM_FIREBASE_AAB_PLAY_LINKED=false
+    WORKFLOW_LAST_VALIDATE_ROOT=$workflow_validate_root
+  }
+
+  workflow_validate_case 'lightweight release tag was rejected' 0 release v1.2.3 '' internal completed play-store notes
+  [ "$(cat "$WORKFLOW_LAST_VALIDATE_ROOT/flutter-play-store-release-inputs/version_name")" = v1.2.3 ] ||
+    fail 'lightweight release tag was not used as version name'
+  workflow_validate_case 'annotated release tag was rejected' 0 release v1.2.4 '' internal completed play-store notes
+  workflow_validate_case 'mismatched release tag was accepted' 1 release v1.2.5 '' internal completed play-store notes
+  workflow_validate_case 'moved release tag was accepted' 1 release v1.2.6 '' internal completed play-store notes
+
+  workflow_injection_marker=$workflow_harness/injection-executed
+  workflow_release_tag_canary='bad tag;$(touch '"$workflow_injection_marker"')'
+  workflow_validate_case 'invalid release tag was accepted' 1 release \
+    "$workflow_release_tag_canary" '' internal completed play-store notes
+  [ ! -e "$workflow_injection_marker" ] || fail 'release-tag injection canary executed'
+
+  git -C "$workflow_repo" checkout -q --detach "$workflow_head_sha"
+  workflow_notes_canary='notes $(touch '"$workflow_injection_marker"') ; `touch ignored`'
+  workflow_validate_case 'manual native-SHA validation failed' 0 workflow_dispatch '' \
+    v2.0.0 internal completed both "$workflow_notes_canary"
+  [ "$(git -C "$workflow_repo" rev-parse HEAD)" = "$workflow_head_sha" ] ||
+    fail 'manual validation changed the native triggering SHA'
+  printf '%s' "$workflow_notes_canary" > "$workflow_harness/notes.expected"
+  assert_same_file "$workflow_harness/notes.expected" \
+    "$WORKFLOW_LAST_VALIDATE_ROOT/flutter-play-store-release-inputs/firebase_release_notes" \
+    'Firebase notes injection canary was not preserved as inert data'
+  [ ! -e "$workflow_injection_marker" ] || fail 'Firebase notes injection canary executed'
+
+  workflow_shell_canary='$(touch '"$workflow_injection_marker"')'
+  workflow_validate_case 'version injection was accepted' 1 workflow_dispatch '' \
+    "v2.0.0$workflow_shell_canary" internal completed play-store notes
+  workflow_validate_case 'track injection was accepted' 1 workflow_dispatch '' \
+    v2.0.0 "internal$workflow_shell_canary" completed play-store notes
+  workflow_validate_case 'status injection was accepted' 1 workflow_dispatch '' \
+    v2.0.0 internal "completed$workflow_shell_canary" play-store notes
+  workflow_validate_case 'distribution target injection was accepted' 1 workflow_dispatch '' \
+    v2.0.0 internal completed "both$workflow_shell_canary" notes
+  [ ! -e "$workflow_injection_marker" ] || fail 'workflow input injection canary executed'
   pass 'workflow_template'
 }
 

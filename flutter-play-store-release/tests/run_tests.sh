@@ -2652,22 +2652,564 @@ SH
   pass 'inspection'
 }
 
-case "${1:-all}" in
-  all)
-    package_contract
-    secret_codecs
-    inspection
-    ;;
-  package_contract)
-    package_contract
-    ;;
-  secret_codecs)
-    secret_codecs
-    ;;
-  inspection)
-    inspection
-    ;;
-  *)
-    fail "unknown test group: $1"
-    ;;
-esac
+project_transaction() {
+  TRANSACTION_ROOT="$TMP_ROOT/project transaction/project with spaces"
+  TRANSACTION_CANDIDATE="$TMP_ROOT/project transaction/candidate"
+  TRANSACTION_LIBRARY="$PACKAGE_ROOT/scripts/lib/project_transaction.sh"
+  mkdir -p "$TRANSACTION_ROOT/android/app" "${TRANSACTION_CANDIDATE%/*}"
+  printf 'old bytes\r\n' > "$TRANSACTION_ROOT/android/app/build.gradle"
+  chmod 640 "$TRANSACTION_ROOT/android/app/build.gradle"
+  printf 'new bytes\r\n' > "$TRANSACTION_CANDIDATE"
+
+  # shellcheck source=/dev/null
+  . "$TRANSACTION_LIBRARY"
+  type fprs_project_transaction_begin >/dev/null 2>&1 ||
+    fail 'missing transaction begin function'
+  type fprs_project_transaction_register >/dev/null 2>&1 ||
+    fail 'missing transaction register function'
+  type fprs_project_transaction_validate >/dev/null 2>&1 ||
+    fail 'missing transaction validation function'
+  type fprs_project_transaction_commit >/dev/null 2>&1 ||
+    fail 'missing transaction commit function'
+
+  fprs_project_transaction_begin "$TRANSACTION_ROOT" ||
+    fail 'transaction begin failed'
+  fprs_project_transaction_register \
+    'android/app/build.gradle' "$TRANSACTION_CANDIDATE" ||
+    fail 'transaction registration failed'
+  fprs_project_transaction_validate ||
+    fail 'transaction validation failed'
+  fprs_project_transaction_commit ||
+    fail 'transaction commit failed'
+
+  assert_same_file "$TRANSACTION_CANDIDATE" \
+    "$TRANSACTION_ROOT/android/app/build.gradle" \
+    'transaction did not install the registered candidate'
+  assert_mode 640 "$TRANSACTION_ROOT/android/app/build.gradle" \
+    'transaction did not preserve the existing file mode'
+
+  printf 'created bytes\n' > "$TRANSACTION_CANDIDATE"
+  chmod 600 "$TRANSACTION_CANDIDATE"
+  fprs_project_transaction_begin "$TRANSACTION_ROOT" ||
+    fail 'create transaction begin failed'
+  fprs_project_transaction_register \
+    'tool/flutter-play-store-release/generated.txt' "$TRANSACTION_CANDIDATE" ||
+    fail 'transaction could not register a target with missing parents'
+  fprs_project_transaction_validate ||
+    fail 'create transaction validation failed'
+  fprs_project_transaction_commit ||
+    fail 'create transaction commit failed'
+  assert_same_file "$TRANSACTION_CANDIDATE" \
+    "$TRANSACTION_ROOT/tool/flutter-play-store-release/generated.txt" \
+    'transaction did not create a nested target'
+  assert_mode 600 \
+    "$TRANSACTION_ROOT/tool/flutter-play-store-release/generated.txt" \
+    'transaction did not preserve the candidate mode for a created file'
+
+  transaction_outside="$TMP_ROOT/project transaction/outside"
+  mkdir -p "$transaction_outside"
+  ln -s "$transaction_outside" "$TRANSACTION_ROOT/escape"
+  fprs_project_transaction_begin "$TRANSACTION_ROOT" ||
+    fail 'containment transaction begin failed'
+  if fprs_project_transaction_register 'escape/refused.txt' "$TRANSACTION_CANDIDATE"; then
+    fail 'transaction accepted a physical path outside the selected root'
+  else
+    transaction_status=$?
+  fi
+  [ "$transaction_status" -eq 2 ] ||
+    fail 'physical containment refusal did not return status 2'
+  fprs_project_transaction_abort || fail 'containment transaction abort failed'
+
+  transaction_race_root="$TMP_ROOT/project transaction/race"
+  mkdir -p "$transaction_race_root"
+  fprs_project_transaction_begin "$transaction_race_root" ||
+    fail 'race transaction begin failed'
+  fprs_project_transaction_register 'pre-existing-untracked.txt' \
+    "$TRANSACTION_CANDIDATE" || fail 'race target registration failed'
+  printf 'user-created during planning\n' > \
+    "$transaction_race_root/pre-existing-untracked.txt"
+  if fprs_project_transaction_validate; then
+    fail 'transaction ignored a new pre-existing untracked file'
+  else
+    transaction_status=$?
+  fi
+  [ "$transaction_status" -eq 2 ] ||
+    fail 'new pre-existing path conflict did not return status 2'
+  fprs_project_transaction_abort || fail 'race transaction abort failed'
+  grep -F 'user-created during planning' \
+    "$transaction_race_root/pre-existing-untracked.txt" >/dev/null 2>&1 ||
+    fail 'transaction removed a pre-existing untracked file'
+
+  transaction_reject_candidate() { return 1; }
+  printf 'validation original\n' > "$transaction_race_root/validation.txt"
+  printf 'validation replacement\n' > "$TRANSACTION_CANDIDATE"
+  fprs_project_transaction_begin "$transaction_race_root" ||
+    fail 'validation transaction begin failed'
+  fprs_project_transaction_register validation.txt "$TRANSACTION_CANDIDATE" ||
+    fail 'validation target registration failed'
+  if fprs_project_transaction_validate transaction_reject_candidate; then
+    fail 'transaction accepted a candidate rejected by pre-write validation'
+  fi
+  fprs_project_transaction_abort || fail 'validation transaction abort failed'
+  [ "$(cat "$transaction_race_root/validation.txt")" = 'validation original' ] ||
+    fail 'candidate validation failure changed the project'
+
+  transaction_failure_root="$TMP_ROOT/project transaction/failure rollback"
+  mkdir -p "$transaction_failure_root/data"
+  printf 'tracked original\r\n' > "$transaction_failure_root/data/tracked.txt"
+  printf 'untracked original\n' > "$transaction_failure_root/data/untracked.txt"
+  chmod 640 "$transaction_failure_root/data/tracked.txt"
+  chmod 604 "$transaction_failure_root/data/untracked.txt"
+  cp "$transaction_failure_root/data/tracked.txt" "$TMP_ROOT/tracked.expected"
+  cp "$transaction_failure_root/data/untracked.txt" "$TMP_ROOT/untracked.expected"
+  printf 'tracked replacement\n' > "$TMP_ROOT/tracked.candidate"
+  printf 'untracked replacement\r\n' > "$TMP_ROOT/untracked.candidate"
+  printf 'created replacement\n' > "$TMP_ROOT/created.candidate"
+  for transaction_fail_after in 1 2 3
+  do
+    cp "$TMP_ROOT/tracked.expected" "$transaction_failure_root/data/tracked.txt"
+    cp "$TMP_ROOT/untracked.expected" "$transaction_failure_root/data/untracked.txt"
+    chmod 640 "$transaction_failure_root/data/tracked.txt"
+    chmod 604 "$transaction_failure_root/data/untracked.txt"
+    rm -f "$transaction_failure_root/data/created.txt"
+    fprs_project_transaction_begin "$transaction_failure_root" ||
+      fail 'rollback transaction begin failed'
+    fprs_project_transaction_register data/tracked.txt "$TMP_ROOT/tracked.candidate" ||
+      fail 'tracked rollback registration failed'
+    fprs_project_transaction_register data/untracked.txt "$TMP_ROOT/untracked.candidate" ||
+      fail 'untracked rollback registration failed'
+    fprs_project_transaction_register data/created.txt "$TMP_ROOT/created.candidate" ||
+      fail 'created rollback registration failed'
+    fprs_project_transaction_validate || fail 'rollback validation failed'
+    if FPRS_TEST_MODE=1 \
+      FPRS_TEST_FAIL_PROJECT_WRITE_AFTER=$transaction_fail_after \
+      fprs_project_transaction_commit
+    then
+      fail "injected project write $transaction_fail_after unexpectedly succeeded"
+    else
+      transaction_status=$?
+    fi
+    [ "$transaction_status" -eq 3 ] ||
+      fail "injected project write $transaction_fail_after did not return status 3"
+    assert_same_file "$TMP_ROOT/tracked.expected" \
+      "$transaction_failure_root/data/tracked.txt" \
+      "tracked bytes changed after injected write $transaction_fail_after"
+    assert_same_file "$TMP_ROOT/untracked.expected" \
+      "$transaction_failure_root/data/untracked.txt" \
+      "untracked bytes changed after injected write $transaction_fail_after"
+    assert_mode 640 "$transaction_failure_root/data/tracked.txt" \
+      "tracked mode changed after injected write $transaction_fail_after"
+    assert_mode 604 "$transaction_failure_root/data/untracked.txt" \
+      "untracked mode changed after injected write $transaction_fail_after"
+    [ ! -e "$transaction_failure_root/data/created.txt" ] ||
+      fail "created path remained after injected write $transaction_fail_after"
+    if find "$transaction_failure_root" -name '.fprs-project-write.*' -print |
+      grep . >/dev/null 2>&1
+    then
+      fail "same-directory temporary file remained after injected write $transaction_fail_after"
+    fi
+  done
+
+  transaction_signal_root="$TMP_ROOT/project transaction/signal"
+  transaction_signal_helper="$TMP_ROOT/project transaction/signal-helper.sh"
+  mkdir -p "$transaction_signal_root"
+  printf 'signal original\r\n' > "$transaction_signal_root/existing.txt"
+  chmod 640 "$transaction_signal_root/existing.txt"
+  cp "$transaction_signal_root/existing.txt" "$TMP_ROOT/signal.expected"
+  printf 'signal replacement\n' > "$TMP_ROOT/signal.candidate"
+  cat > "$transaction_signal_helper" <<'SH'
+#!/usr/bin/env bash
+set -u
+. "$1"
+fprs_project_transaction_begin "$2" || exit $?
+fprs_project_transaction_register existing.txt "$3" || exit $?
+fprs_project_transaction_validate || exit $?
+fprs_project_transaction_commit
+SH
+  chmod 700 "$transaction_signal_helper"
+  if env FPRS_TEST_MODE=1 FPRS_TEST_SIGNAL_AT=project-write \
+    /bin/bash "$transaction_signal_helper" "$TRANSACTION_LIBRARY" \
+    "$transaction_signal_root" "$TMP_ROOT/signal.candidate" \
+    > "$TMP_ROOT/signal.stdout" 2> "$TMP_ROOT/signal.stderr"
+  then
+    fail 'injected transaction signal unexpectedly succeeded'
+  else
+    transaction_status=$?
+  fi
+  [ "$transaction_status" -eq 3 ] ||
+    fail 'injected transaction signal did not return status 3'
+  grep -F 'rollback attempted' "$TMP_ROOT/signal.stderr" >/dev/null 2>&1 ||
+    fail 'injected transaction signal did not report rollback'
+  assert_same_file "$TMP_ROOT/signal.expected" \
+    "$transaction_signal_root/existing.txt" \
+    'signal rollback changed original bytes'
+  assert_mode 640 "$transaction_signal_root/existing.txt" \
+    'signal rollback changed original mode'
+
+  if grep -E 'git[[:space:]]+(checkout|restore|reset)' \
+    "$TRANSACTION_LIBRARY" >/dev/null 2>&1
+  then
+    fail 'project transaction uses Git for restoration'
+  fi
+  pass 'project_transaction'
+}
+
+gradle_signing() {
+  GRADLE_ROOT="$TMP_ROOT/gradle signing"
+  GRADLE_SOURCE="$GRADLE_ROOT/build.gradle"
+  GRADLE_CANDIDATE="$GRADLE_ROOT/build.gradle.candidate"
+  GRADLE_LIBRARY="$PACKAGE_ROOT/scripts/lib/gradle_signing.sh"
+  mkdir -p "$GRADLE_ROOT"
+  cat > "$GRADLE_SOURCE" <<'GRADLE'
+android {
+    buildTypes {
+        release {
+            signingConfig signingConfigs.debug
+        }
+    }
+}
+GRADLE
+
+  # shellcheck source=/dev/null
+  . "$GRADLE_LIBRARY"
+  type fprs_gradle_signing_candidate >/dev/null 2>&1 ||
+    fail 'missing Gradle candidate function'
+  fprs_gradle_signing_candidate groovy "$GRADLE_SOURCE" \
+    "$GRADLE_CANDIDATE" || fail 'Groovy Gradle candidate generation failed'
+  grep -F 'BEGIN flutter-play-store-release schema=1' \
+    "$GRADLE_CANDIDATE" >/dev/null 2>&1 ||
+    fail 'Gradle candidate omitted the owned signing block'
+  if LC_ALL=C grep "$(printf '\r')" "$GRADLE_CANDIDATE" >/dev/null 2>&1; then
+    fail 'Gradle candidate introduced CRLF into an LF source'
+  fi
+  if grep -F 'signingConfig signingConfigs.debug' \
+    "$GRADLE_CANDIDATE" >/dev/null 2>&1; then
+    fail 'Gradle candidate retained stock debug release signing'
+  fi
+  gradle_store_file_count=$(grep -c 'storeFile' "$GRADLE_CANDIDATE")
+  [ "$gradle_store_file_count" -gt 0 ] ||
+    fail 'Gradle candidate did not connect storeFile'
+
+  for gradle_property in storeFile storePassword keyAlias keyPassword
+  do
+    gradle_assignment_count=$(grep -Ec \
+      "^[[:space:]]*$gradle_property([[:space:]]+|[[:space:]]*=[[:space:]]*)" \
+      "$GRADLE_CANDIDATE")
+    [ "$gradle_assignment_count" -eq 1 ] ||
+      fail "$gradle_property was not connected exactly once in Groovy"
+  done
+  grep -F 'providers.environmentVariable("ANDROID_KEY_PROPERTIES_PATH").orNull' \
+    "$GRADLE_CANDIDATE" >/dev/null 2>&1 ||
+    fail 'Groovy block omitted the key-properties override'
+  grep -F 'rootProject.file("key.properties")' "$GRADLE_CANDIDATE" >/dev/null 2>&1 ||
+    fail 'Groovy block omitted the android/key.properties fallback'
+  grep -F 'gradle.startParameter.taskNames.any' "$GRADLE_CANDIDATE" >/dev/null 2>&1 ||
+    fail 'Groovy block does not inspect directly requested tasks'
+  gradle_guard_line=$(grep -n 'if (fprsReleaseSigningTaskRequested)' \
+    "$GRADLE_CANDIDATE" | sed -n '1s/:.*//p')
+  gradle_load_line=$(grep -n 'withInputStream' "$GRADLE_CANDIDATE" |
+    sed -n '1s/:.*//p')
+  [ -n "$gradle_guard_line" ] && [ -n "$gradle_load_line" ] &&
+    [ "$gradle_guard_line" -lt "$gradle_load_line" ] ||
+    fail 'Groovy block reads key properties outside the direct release-task guard'
+  if grep -E 'taskGraph|println|logger\.' \
+    "$GRADLE_CANDIDATE" >/dev/null 2>&1; then
+    fail 'Groovy signing guard uses a late task graph or secret-shaped output'
+  fi
+
+  cp "$GRADLE_SOURCE" "$GRADLE_ROOT/groovy.source.expected"
+  chmod 640 "$GRADLE_SOURCE"
+  fprs_gradle_signing_candidate groovy "$GRADLE_CANDIDATE" \
+    "$GRADLE_ROOT/groovy.second" || fail 'second Groovy generation failed'
+  assert_same_file "$GRADLE_CANDIDATE" "$GRADLE_ROOT/groovy.second" \
+    'second Groovy generation changed the candidate'
+  assert_same_file "$GRADLE_ROOT/groovy.source.expected" "$GRADLE_SOURCE" \
+    'Gradle planner modified its source file'
+
+  gradle_kotlin_source="$GRADLE_ROOT/build.gradle.kts"
+  gradle_kotlin_candidate="$GRADLE_ROOT/build.gradle.kts.candidate"
+  cat > "$gradle_kotlin_source" <<'KOTLIN'
+android {
+    buildTypes {
+        getByName("release") {
+            signingConfig = signingConfigs.getByName("debug")
+        }
+    }
+}
+KOTLIN
+  chmod 644 "$gradle_kotlin_source"
+  fprs_gradle_signing_candidate kotlin "$gradle_kotlin_source" \
+    "$gradle_kotlin_candidate" release ||
+    fail 'Kotlin Gradle candidate generation failed'
+  if grep -F 'signingConfigs.getByName("debug")' \
+    "$gradle_kotlin_candidate" >/dev/null 2>&1; then
+    fail 'Kotlin Gradle candidate retained stock debug release signing'
+  fi
+  for gradle_property in storeFile storePassword keyAlias keyPassword
+  do
+    gradle_assignment_count=$(grep -Ec \
+      "^[[:space:]]*$gradle_property[[:space:]]*=" \
+      "$gradle_kotlin_candidate")
+    [ "$gradle_assignment_count" -eq 1 ] ||
+      fail "$gradle_property was not connected exactly once in Kotlin"
+  done
+  gradle_guard_line=$(grep -n 'if (fprsReleaseSigningTaskRequested)' \
+    "$gradle_kotlin_candidate" | sed -n '1s/:.*//p')
+  gradle_load_line=$(grep -n 'inputStream().use' "$gradle_kotlin_candidate" |
+    sed -n '1s/:.*//p')
+  [ -n "$gradle_guard_line" ] && [ -n "$gradle_load_line" ] &&
+    [ "$gradle_guard_line" -lt "$gradle_load_line" ] ||
+    fail 'Kotlin block reads key properties outside the direct release-task guard'
+  assert_mode 644 "$gradle_kotlin_candidate" \
+    'Kotlin candidate did not preserve source mode'
+  fprs_gradle_signing_candidate kotlin "$gradle_kotlin_candidate" \
+    "$GRADLE_ROOT/kotlin.second" release || fail 'second Kotlin generation failed'
+  assert_same_file "$gradle_kotlin_candidate" "$GRADLE_ROOT/kotlin.second" \
+    'second Kotlin generation changed the candidate'
+
+  gradle_crlf_source="$GRADLE_ROOT/crlf build.gradle"
+  gradle_crlf_candidate="$GRADLE_ROOT/crlf candidate.gradle"
+  awk '{ printf "%s\r\n", $0 }' "$GRADLE_SOURCE" > "$gradle_crlf_source"
+  chmod 604 "$gradle_crlf_source"
+  fprs_gradle_signing_candidate groovy "$gradle_crlf_source" \
+    "$gradle_crlf_candidate" || fail 'CRLF Gradle generation failed'
+  awk 'substr($0, length($0), 1) != "\r" { exit 1 }' \
+    "$gradle_crlf_candidate" || fail 'Gradle candidate changed CRLF line endings'
+  assert_mode 604 "$gradle_crlf_candidate" \
+    'Gradle candidate changed a nondefault file mode'
+
+  gradle_custom_source="$GRADLE_ROOT/custom signing.gradle"
+  gradle_custom_candidate="$GRADLE_ROOT/custom candidate.gradle"
+  cat > "$gradle_custom_source" <<'GRADLE'
+android {
+    signingConfigs {
+        upload {
+            storeFile file("user-owned.jks")
+        }
+    }
+    buildTypes {
+        release {
+            signingConfig signingConfigs.upload
+        }
+    }
+}
+GRADLE
+  fprs_gradle_signing_candidate groovy "$gradle_custom_source" \
+    "$gradle_custom_candidate" || fail 'valid user-owned signing was rejected'
+  [ "$FPRS_GRADLE_SIGNING_CLASSIFICATION" = preserve ] ||
+    fail 'valid user-owned signing was not classified as preserve'
+  assert_same_file "$gradle_custom_source" "$gradle_custom_candidate" \
+    'valid user-owned signing was modified'
+
+  gradle_conflict_source="$GRADLE_ROOT/conflict.gradle"
+  cat > "$gradle_conflict_source" <<'GRADLE'
+android {
+    buildTypes {
+        release {
+            signingConfig signingConfigs.debug
+            signingConfig signingConfigs.release
+        }
+    }
+}
+GRADLE
+  if fprs_gradle_signing_candidate groovy "$gradle_conflict_source" \
+    "$GRADLE_ROOT/conflict.candidate"; then
+    fail 'simultaneous debug and release signing was accepted'
+  else
+    gradle_status=$?
+  fi
+  [ "$gradle_status" -eq 2 ] ||
+    fail 'simultaneous signing conflict did not return status 2'
+
+  cat > "$gradle_conflict_source" <<'GRADLE'
+android {
+    buildTypes {
+        release {
+            signingConfig signingConfigs.upload
+        }
+    }
+}
+GRADLE
+  if fprs_gradle_signing_candidate groovy "$gradle_conflict_source" \
+    "$GRADLE_ROOT/missing-config.candidate"; then
+    fail 'undeclared custom signing config was accepted'
+  fi
+
+  cat > "$gradle_conflict_source" <<'GRADLE'
+android {
+    // BEGIN flutter-play-store-release schema=1
+    // END flutter-play-store-release
+    // BEGIN flutter-play-store-release schema=1
+    // END flutter-play-store-release
+}
+GRADLE
+  if fprs_gradle_signing_candidate groovy "$gradle_conflict_source" \
+    "$GRADLE_ROOT/multiple-marker.candidate"; then
+    fail 'multiple owned marker blocks were accepted'
+  fi
+
+  cat > "$gradle_conflict_source" <<'GRADLE'
+// BEGIN flutter-play-store-release schema=1
+// END flutter-play-store-release
+android {
+}
+GRADLE
+  if fprs_gradle_signing_candidate groovy "$gradle_conflict_source" \
+    "$GRADLE_ROOT/outside-marker.candidate"; then
+    fail 'owned marker outside the structural android scope was accepted'
+  fi
+
+  cat > "$gradle_conflict_source" <<'GRADLE'
+// android { }
+android {
+}
+android {
+}
+GRADLE
+  if fprs_gradle_signing_candidate groovy "$gradle_conflict_source" \
+    "$GRADLE_ROOT/multiple-android.candidate"; then
+    fail 'multiple structural android scopes were accepted'
+  fi
+  pass 'gradle_signing'
+}
+
+bootstrap_core_run() {
+  bootstrap_description=$1
+  bootstrap_expected_status=$2
+  shift 2
+  bootstrap_case_index=$((bootstrap_case_index + 1))
+  BOOTSTRAP_LAST_STDOUT="$BOOTSTRAP_LOGS/$bootstrap_case_index.stdout"
+  BOOTSTRAP_LAST_STDERR="$BOOTSTRAP_LOGS/$bootstrap_case_index.stderr"
+  if "$@" > "$BOOTSTRAP_LAST_STDOUT" 2> "$BOOTSTRAP_LAST_STDERR"; then
+    bootstrap_actual_status=0
+  else
+    bootstrap_actual_status=$?
+  fi
+  [ "$bootstrap_actual_status" -eq "$bootstrap_expected_status" ] ||
+    fail "$bootstrap_description (expected exit $bootstrap_expected_status, got $bootstrap_actual_status)"
+}
+
+bootstrap_core() {
+  BOOTSTRAP="$PACKAGE_ROOT/scripts/bootstrap_android_fastlane.sh"
+  BOOTSTRAP_ROOT="$TMP_ROOT/bootstrap core"
+  BOOTSTRAP_LOGS="$BOOTSTRAP_ROOT/logs"
+  bootstrap_case_index=0
+  mkdir -p "$BOOTSTRAP_LOGS"
+
+  bootstrap_dry_project="$BOOTSTRAP_ROOT/dry run project with spaces"
+  bootstrap_dry_baseline="$BOOTSTRAP_ROOT/dry baseline"
+  inspection_make_minimal_kotlin "$bootstrap_dry_project"
+  cp -R "$bootstrap_dry_project" "$bootstrap_dry_baseline"
+  bootstrap_core_run 'fresh bootstrap dry run failed' 0 \
+    "$BOOTSTRAP" --project "$bootstrap_dry_project" --dry-run
+  diff -r "$bootstrap_dry_baseline" "$bootstrap_dry_project" >/dev/null 2>&1 ||
+    fail 'bootstrap dry run changed the project'
+  bootstrap_plan_count=$(grep -c '^PLAN ' "$BOOTSTRAP_LAST_STDOUT" || true)
+  [ "$bootstrap_plan_count" -eq 15 ] ||
+    fail "bootstrap dry run did not plan all 15 targets (got $bootstrap_plan_count)"
+  awk '/^PLAN / { print $3 }' "$BOOTSTRAP_LAST_STDOUT" > "$BOOTSTRAP_ROOT/plan.paths"
+  LC_ALL=C sort "$BOOTSTRAP_ROOT/plan.paths" > "$BOOTSTRAP_ROOT/plan.sorted"
+  assert_same_file "$BOOTSTRAP_ROOT/plan.sorted" "$BOOTSTRAP_ROOT/plan.paths" \
+    'bootstrap plan was not sorted by target path'
+  grep -F 'PLAN merge android/app/build.gradle.kts' \
+    "$BOOTSTRAP_LAST_STDOUT" >/dev/null 2>&1 ||
+    fail 'bootstrap did not classify the Gradle candidate as a merge'
+  grep -F 'PLAN create android/Gemfile' "$BOOTSTRAP_LAST_STDOUT" >/dev/null 2>&1 ||
+    fail 'bootstrap did not classify an absent generated target as create'
+
+  bootstrap_conflict_project="$BOOTSTRAP_ROOT/conflict project"
+  inspection_make_minimal_kotlin "$bootstrap_conflict_project"
+  mkdir -p "$bootstrap_conflict_project/.github/workflows"
+  printf 'name: user-owned workflow\n' > \
+    "$bootstrap_conflict_project/.github/workflows/release-android.yml"
+  cp -R "$bootstrap_conflict_project" "$BOOTSTRAP_ROOT/conflict baseline"
+  bootstrap_core_run 'default bootstrap conflict did not fail' 2 \
+    "$BOOTSTRAP" --project "$bootstrap_conflict_project" --dry-run
+  grep -F 'PLAN fail-conflict .github/workflows/release-android.yml' \
+    "$BOOTSTRAP_LAST_STDOUT" >/dev/null 2>&1 ||
+    fail 'default conflict was not classified as fail-conflict'
+  diff -r "$BOOTSTRAP_ROOT/conflict baseline" "$bootstrap_conflict_project" \
+    >/dev/null 2>&1 || fail 'conflict planning changed the project'
+
+  bootstrap_core_run 'skip conflict did not report incomplete setup' 1 \
+    "$BOOTSTRAP" --project "$bootstrap_conflict_project" \
+    --dry-run --conflict skip
+  grep -F 'PLAN skip-conflict .github/workflows/release-android.yml' \
+    "$BOOTSTRAP_LAST_STDOUT" >/dev/null 2>&1 ||
+    fail 'skip conflict was not classified as skip-conflict'
+  diff -r "$BOOTSTRAP_ROOT/conflict baseline" "$bootstrap_conflict_project" \
+    >/dev/null 2>&1 || fail 'skip conflict changed the project'
+
+  bootstrap_core_run 'missing bootstrap arguments were accepted' 2 "$BOOTSTRAP"
+  bootstrap_core_run 'invalid conflict mode was accepted' 2 \
+    "$BOOTSTRAP" --project "$bootstrap_dry_project" --conflict overwrite
+
+  bootstrap_apply_project="$BOOTSTRAP_ROOT/apply project"
+  inspection_make_minimal_kotlin "$bootstrap_apply_project"
+  bootstrap_core_run 'fresh bootstrap apply failed' 0 \
+    "$BOOTSTRAP" --project "$bootstrap_apply_project"
+  grep -F 'BEGIN flutter-play-store-release schema=1' \
+    "$bootstrap_apply_project/android/app/build.gradle.kts" >/dev/null 2>&1 ||
+    fail 'bootstrap apply did not install the Gradle signing candidate'
+  for bootstrap_created_path in \
+    android/Gemfile \
+    android/fastlane/Fastfile \
+    .github/workflows/release-android.yml \
+    docs/PLAY_STORE_RELEASE.md \
+    tool/flutter-play-store-release/decode_secret.sh \
+    tool/flutter-play-store-release/managed-files.sha256
+  do
+    [ -f "$bootstrap_apply_project/$bootstrap_created_path" ] ||
+      fail "bootstrap apply omitted $bootstrap_created_path"
+  done
+  cp -R "$bootstrap_apply_project" "$BOOTSTRAP_ROOT/apply baseline"
+  bootstrap_core_run 'second bootstrap apply failed' 0 \
+    "$BOOTSTRAP" --project "$bootstrap_apply_project"
+  diff -r "$BOOTSTRAP_ROOT/apply baseline" "$bootstrap_apply_project" \
+    >/dev/null 2>&1 || fail 'second bootstrap apply changed the project'
+
+  for bootstrap_fail_after in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+  do
+    bootstrap_failure_project="$BOOTSTRAP_ROOT/failure $bootstrap_fail_after"
+    bootstrap_failure_baseline="$BOOTSTRAP_ROOT/failure baseline $bootstrap_fail_after"
+    inspection_make_minimal_kotlin "$bootstrap_failure_project"
+    cp -R "$bootstrap_failure_project" "$bootstrap_failure_baseline"
+    bootstrap_core_run "bootstrap write failure $bootstrap_fail_after did not roll back" 3 \
+      env FPRS_TEST_MODE=1 \
+      FPRS_TEST_FAIL_PROJECT_WRITE_AFTER="$bootstrap_fail_after" \
+      "$BOOTSTRAP" --project "$bootstrap_failure_project"
+    grep -F 'rollback attempted' "$BOOTSTRAP_LAST_STDERR" >/dev/null 2>&1 ||
+      fail "bootstrap write failure $bootstrap_fail_after did not report rollback"
+    diff -r "$bootstrap_failure_baseline" "$bootstrap_failure_project" \
+      >/dev/null 2>&1 ||
+      fail "bootstrap write failure $bootstrap_fail_after changed project bytes"
+  done
+  pass 'bootstrap_core'
+}
+
+run_test_group() {
+  case "$1" in
+    package_contract) package_contract ;;
+    secret_codecs) secret_codecs ;;
+    inspection) inspection ;;
+    project_transaction) project_transaction ;;
+    gradle_signing) gradle_signing ;;
+    bootstrap_core) bootstrap_core ;;
+    *) fail "unknown test group: $1" ;;
+  esac
+}
+
+if [ "$#" -eq 0 ] || [ "${1-}" = all ]; then
+  [ "$#" -le 1 ] || fail 'all cannot be combined with named test groups'
+  package_contract
+  secret_codecs
+  inspection
+  project_transaction
+  gradle_signing
+  bootstrap_core
+else
+  for requested_group in "$@"
+  do
+    run_test_group "$requested_group"
+  done
+fi

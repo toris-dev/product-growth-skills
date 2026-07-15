@@ -4176,6 +4176,29 @@ GRADLE
         assert_same_file "$GRADLE_ROOT/unsupported-selector.expected" \
           "$gradle_unsupported_selector" \
           'unsupported release selector conflict changed the source'
+
+        gradle_multi_token_source="$GRADLE_ROOT/multi-token-signing.gradle"
+        cat > "$gradle_multi_token_source" <<'GRADLE'
+def signingConfig = null; android { buildTypes { release { signingConfig signingConfigs.debug } } }
+android {
+}
+GRADLE
+        cp "$gradle_multi_token_source" \
+          "$GRADLE_ROOT/multi-token-signing.expected"
+        if fprs_gradle_signing_candidate groovy "$gradle_multi_token_source" \
+          "$GRADLE_ROOT/multi-token-signing.candidate"
+        then
+          fail 'later same-line signing token retained debug signing during merge'
+        else
+          gradle_status=$?
+        fi
+        [ "$gradle_status" -eq 2 ] ||
+          fail 'multi-token signing conflict did not return status 2'
+        [ ! -e "$GRADLE_ROOT/multi-token-signing.candidate" ] ||
+          fail 'multi-token signing conflict published a candidate'
+        assert_same_file "$GRADLE_ROOT/multi-token-signing.expected" \
+          "$gradle_multi_token_source" \
+          'multi-token signing conflict changed the source'
       fi
 
       if [ "${FPRS_COMPACT_SIGNING_DSL-all}" != groovy ]; then

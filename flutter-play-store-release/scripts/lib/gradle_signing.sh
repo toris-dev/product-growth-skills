@@ -819,8 +819,8 @@ fprs_gradle_signing_scan() {
       code = uncomment($0)
       stripped = trim(code)
       structural = structural_code(code)
-      visible_signing = match(structural, /(^|[^A-Za-z0-9_])(signingConfig|setSigningConfig)([^A-Za-z0-9_]|$)/)
-      signing_position = RSTART
+      first_signing = match(structural, /(^|[^A-Za-z0-9_])(signingConfig|setSigningConfig)([^A-Za-z0-9_]|$)/)
+      first_signing_position = RSTART
       assignment_handled = 0
       before_depth = depth
 
@@ -857,7 +857,7 @@ fprs_gradle_signing_scan() {
         if (declaration_name != "") declarations[declaration_name]++
       }
       if (release_depth > 0 && before_depth == release_depth &&
-          visible_signing) {
+          first_signing) {
         kind = assignment_kind(stripped)
         assignments++
         assignment_handled = 1
@@ -869,9 +869,18 @@ fprs_gradle_signing_scan() {
           custom_name = assignment_name
         } else invalid_count++
       }
-      if (visible_signing && !assignment_handled &&
-          android_scope_before(structural, signing_position)) {
-        invalid_count++
+      signing_search_from = 1
+      while (signing_search_from <= length(structural)) {
+        signing_search = substr(structural, signing_search_from)
+        if (!match(signing_search, /(^|[^A-Za-z0-9_])(signingConfig|setSigningConfig)([^A-Za-z0-9_]|$)/)) break
+        signing_position = signing_search_from + RSTART - 1
+        signing_search_next = signing_search_from + RSTART + RLENGTH - 1
+        if (!(assignment_handled &&
+              signing_position == first_signing_position) &&
+            android_scope_before(structural, signing_position)) {
+          invalid_count++
+        }
+        signing_search_from = signing_search_next
       }
 
       delta = brace_delta(code)

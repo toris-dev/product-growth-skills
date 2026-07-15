@@ -4669,6 +4669,33 @@ bootstrap_core() {
   pass 'bootstrap_core'
 }
 
+fastlane_templates() {
+  ruby -c "$PACKAGE_ROOT/templates/FlutterPlayStoreRelease.rb" >/dev/null ||
+    fail 'FlutterPlayStoreRelease.rb has invalid Ruby syntax'
+  ruby -c "$PACKAGE_ROOT/templates/Fastfile" >/dev/null ||
+    fail 'Fastfile has invalid Ruby syntax'
+  ruby "$PACKAGE_ROOT/tests/fastlane_helper_test.rb" ||
+    fail 'Fastlane helper and adapter tests failed'
+  grep -F 'gem "fastlane", "= 2.237.0"' "$PACKAGE_ROOT/templates/Gemfile" >/dev/null 2>&1 ||
+    fail 'Gemfile does not pin Fastlane 2.237.0 exactly'
+  grep -F 'gem "fastlane-plugin-firebase_app_distribution", "= 1.0.0"' \
+    "$PACKAGE_ROOT/templates/Pluginfile" >/dev/null 2>&1 ||
+    fail 'Pluginfile does not pin Firebase App Distribution 1.0.0 exactly'
+  grep -E '^[[:space:]]+4\.0\.16$' "$PACKAGE_ROOT/templates/Gemfile.lock" >/dev/null 2>&1 ||
+    fail 'Gemfile.lock was not generated with Bundler 4.0.16'
+  for fastlane_platform in ruby aarch64-linux x86_64-linux arm64-darwin x86_64-darwin
+  do
+    grep -F "  $fastlane_platform" "$PACKAGE_ROOT/templates/Gemfile.lock" >/dev/null 2>&1 ||
+      fail "Gemfile.lock is missing supported platform: $fastlane_platform"
+  done
+  grep -F '  fastlane (= 2.237.0)' "$PACKAGE_ROOT/templates/Gemfile.lock" >/dev/null 2>&1 ||
+    fail 'Gemfile.lock does not preserve the exact Fastlane dependency'
+  grep -F '  fastlane-plugin-firebase_app_distribution (= 1.0.0)' \
+    "$PACKAGE_ROOT/templates/Gemfile.lock" >/dev/null 2>&1 ||
+    fail 'Gemfile.lock does not preserve the exact Firebase plugin dependency'
+  pass 'fastlane_templates'
+}
+
 run_test_group() {
   case "$1" in
     package_contract) package_contract ;;
@@ -4677,6 +4704,7 @@ run_test_group() {
     project_transaction) project_transaction ;;
     gradle_signing) gradle_signing ;;
     bootstrap_core) bootstrap_core ;;
+    fastlane_templates) fastlane_templates ;;
     *) fail "unknown test group: $1" ;;
   esac
 }
@@ -4689,6 +4717,7 @@ if [ "$#" -eq 0 ] || [ "${1-}" = all ]; then
   project_transaction
   gradle_signing
   bootstrap_core
+  fastlane_templates
 else
   for requested_group in "$@"
   do

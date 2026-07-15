@@ -1,1 +1,5 @@
-# Document Android signing property names without embedding secret values.
+# Local-only Android signing fallback. Keep android/key.properties untracked.
+storeFile=/absolute/path/to/upload.jks
+storePassword=replace-locally
+keyAlias=upload
+keyPassword=replace-locally

@@ -1,1 +1,1 @@
-# Declare exact Fastlane plugins used by generated Android release lanes.
+gem "fastlane-plugin-firebase_app_distribution", "= 1.0.0"

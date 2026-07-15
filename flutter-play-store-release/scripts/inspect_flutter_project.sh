@@ -338,6 +338,500 @@ fprs_read_property() {
   ' "$fprs_file"
 }
 
+fprs_extract_android_records() {
+  awk '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    function compact(value) {
+      gsub(/[[:space:]]/, "", value)
+      return value
+    }
+    function mask_strings(value, result, index_value, character, quote, escaped) {
+      result = ""
+      quote = ""
+      escaped = 0
+      for (index_value = 1; index_value <= length(value); index_value++) {
+        character = substr(value, index_value, 1)
+        if (quote != "") {
+          result = result " "
+          if (escaped) escaped = 0
+          else if (character == "\\") escaped = 1
+          else if (character == quote) quote = ""
+        } else if (character == "\"" || character == "\047") {
+          quote = character
+          result = result " "
+        } else result = result character
+      }
+      return result
+    }
+    function has_token(value, key, masked) {
+      masked = mask_strings(value)
+      return masked ~ ("(^|[^A-Za-z0-9_])" key "([^A-Za-z0-9_]|$)")
+    }
+    function assignment_rhs(value, key, pattern) {
+      assignment_ok = 0
+      value = trim(value)
+      pattern = "^" key "([[:space:]]+|[[:space:]]*=[[:space:]]*)"
+      if (!match(value, pattern)) return ""
+      value = trim(substr(value, RSTART + RLENGTH))
+      assignment_ok = 1
+      return value
+    }
+    function literal_value(value, quote, index_value, character, escaped, result, remainder) {
+      literal_ok = 0
+      value = trim(value)
+      quote = substr(value, 1, 1)
+      if (quote != "\"" && quote != "\047") return ""
+      escaped = 0
+      result = ""
+      for (index_value = 2; index_value <= length(value); index_value++) {
+        character = substr(value, index_value, 1)
+        if (escaped) return ""
+        if (character == "\\") {
+          escaped = 1
+          continue
+        }
+        if (character == quote) {
+          remainder = trim(substr(value, index_value + 1))
+          if (remainder != "") return ""
+          literal_ok = 1
+          return result
+        }
+        result = result character
+      }
+      return ""
+    }
+    function current_scope_is(kind_value) {
+      return scope_kind[depth] == kind_value
+    }
+    function ancestor_index(kind_value, index_value) {
+      for (index_value = depth; index_value > 0; index_value--) {
+        if (scope_kind[index_value] == kind_value) return index_value
+      }
+      return 0
+    }
+    function callback_ancestor(prefix, index_value) {
+      for (index_value = depth; index_value > 0; index_value--) {
+        if (scope_kind[index_value] == prefix "_callback") return index_value
+      }
+      return 0
+    }
+    function reserved_callback(value, base) {
+      value = compact(value)
+      base = value
+      sub(/\(.*/, "", base)
+      return base == "all" || base == "configureEach" ||
+        base == "whenObjectAdded" || base == "matching" ||
+        base == "named" || base == "withType" || base == "register"
+    }
+    function static_flavor_name(value, candidate) {
+      candidate = compact(value)
+      if (candidate ~ /^(create|maybeCreate)\(["\047][A-Za-z][A-Za-z0-9_-]*["\047]\)$/) {
+        sub(/^(create|maybeCreate)\(["\047]/, "", candidate)
+        sub(/["\047]\)$/, "", candidate)
+        return candidate
+      }
+      if (candidate ~ /^[A-Za-z][A-Za-z0-9_-]*$/ &&
+          !reserved_callback(candidate)) return candidate
+      return ""
+    }
+    function static_build_type_name(value, candidate) {
+      candidate = compact(value)
+      if (candidate ~ /^(getByName|named|create|maybeCreate)\(["\047][A-Za-z][A-Za-z0-9_-]*["\047]\)$/) {
+        sub(/^(getByName|named|create|maybeCreate)\(["\047]/, "", candidate)
+        sub(/["\047]\)$/, "", candidate)
+        return candidate
+      }
+      if (candidate ~ /^[A-Za-z][A-Za-z0-9_-]*$/ &&
+          !reserved_callback(candidate)) return candidate
+      return ""
+    }
+    function mark_default(key, statement, direct, rhs, value, normalized) {
+      default_count[key]++
+      if (default_count[key] > 1 || !direct) {
+        default_status[key] = "unresolved"
+        default_value[key] = ""
+        return
+      }
+      rhs = assignment_rhs(statement, key)
+      if (!assignment_ok) {
+        default_status[key] = "unresolved"
+        return
+      }
+      if (key == "applicationId") {
+        value = literal_value(rhs)
+        if (literal_ok && value ~ /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/) {
+          default_status[key] = "resolved"
+          default_value[key] = value
+        } else default_status[key] = "unresolved"
+        return
+      }
+      if (key == "versionName") {
+        value = literal_value(rhs)
+        if (literal_ok && value ~ /^[0-9A-Za-z][0-9A-Za-z._+-]*$/) {
+          default_status[key] = "resolved"
+          default_value[key] = value
+          return
+        }
+        normalized = compact(rhs)
+        if (normalized ~ /^\(project\.findProperty\(["\047]VERSION_NAME["\047]\)\?:["\047][0-9A-Za-z._+-]+["\047]\)\.toString\(\)$/) {
+          default_status[key] = "gradle"
+        } else if (normalized == "flutter.versionName" || normalized == "flutterVersionName") {
+          default_status[key] = "flutter"
+        } else default_status[key] = "unresolved"
+        return
+      }
+      normalized = compact(rhs)
+      if (normalized ~ /^[0-9][0-9_]*$/) {
+        gsub(/_/, "", normalized)
+        default_status[key] = "resolved"
+        default_value[key] = normalized
+      } else if (normalized ~ /^\(project\.findProperty\(["\047]VERSION_CODE["\047]\)\?:["\047][0-9]+["\047]\)\.toString\(\)\.toInt\(\)$/) {
+        default_status[key] = "gradle"
+      } else if (normalized == "flutter.versionCode" || normalized == "flutterVersionCode" ||
+                 normalized == "flutterVersionCode.toInteger()") {
+        default_status[key] = "flutter"
+      } else default_status[key] = "unresolved"
+    }
+    function mark_flavor(name, key, statement, direct, record_key, rhs, value) {
+      record_key = name SUBSEP key
+      flavor_field_count[record_key]++
+      if (flavor_field_count[record_key] > 1 || !direct) {
+        flavor_field_status[record_key] = "unresolved"
+        flavor_field_value[record_key] = ""
+        flavor_identity_unresolved = 1
+        return
+      }
+      rhs = assignment_rhs(statement, key)
+      value = literal_value(rhs)
+      if (!assignment_ok || !literal_ok) {
+        flavor_field_status[record_key] = "unresolved"
+        flavor_identity_unresolved = 1
+        return
+      }
+      if (key == "applicationId") {
+        if (value !~ /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/) {
+          flavor_field_status[record_key] = "unresolved"
+          flavor_identity_unresolved = 1
+          return
+        }
+      } else if (value !~ /^\.?[A-Za-z0-9_.-]*$/) {
+        flavor_field_status[record_key] = "unresolved"
+        flavor_identity_unresolved = 1
+        return
+      }
+      flavor_field_status[record_key] = "resolved"
+      flavor_field_value[record_key] = value
+    }
+    function mark_release_suffix(statement, direct, rhs, value) {
+      release_suffix_count++
+      if (release_suffix_count > 1 || !direct) {
+        release_suffix_status = "unresolved"
+        release_suffix_value = ""
+        return
+      }
+      rhs = assignment_rhs(statement, "applicationIdSuffix")
+      value = literal_value(rhs)
+      if (assignment_ok && literal_ok && value ~ /^\.?[A-Za-z0-9_.-]*$/) {
+        release_suffix_status = "resolved"
+        release_suffix_value = value
+      } else release_suffix_status = "unresolved"
+    }
+    function mark_release_signing(statement, direct, rhs, normalized) {
+      release_signing_count++
+      if (release_signing_count > 1 || !direct) {
+        release_signing_status = "unknown"
+        return
+      }
+      rhs = assignment_rhs(statement, "signingConfig")
+      normalized = compact(rhs)
+      if (!assignment_ok) {
+        release_signing_status = "unknown"
+      } else if (normalized == "signingConfigs.debug" ||
+          normalized ~ /^signingConfigs\.getByName\(["\047]debug["\047]\)$/ ||
+          normalized ~ /^signingConfigs\[["\047]debug["\047]\]$/ ||
+          normalized ~ /^signingConfigs\.named\(["\047]debug["\047]\)\.get\(\)$/) {
+        release_signing_status = "debug"
+      } else if (normalized ~ /^signingConfigs\.[A-Za-z][A-Za-z0-9_]*$/ ||
+          normalized ~ /^signingConfigs\.getByName\(["\047][A-Za-z][A-Za-z0-9_]*["\047]\)$/ ||
+          normalized ~ /^signingConfigs\[["\047][A-Za-z][A-Za-z0-9_]*["\047]\]$/ ||
+          normalized ~ /^signingConfigs\.named\(["\047][A-Za-z][A-Za-z0-9_]*["\047]\)\.get\(\)$/) {
+        release_signing_status = "release"
+      } else release_signing_status = "unknown"
+    }
+    function mark_java(side, statement, direct, rhs, normalized, token) {
+      java_count[side]++
+      if (java_count[side] > 1 || !direct) {
+        java_status[side] = "unresolved"
+        java_value[side] = ""
+        return
+      }
+      rhs = assignment_rhs(statement, side)
+      normalized = compact(rhs)
+      if (!assignment_ok || normalized !~ /^JavaVersion\.VERSION_([0-9]+|1_[0-9]+)$/) {
+        java_status[side] = "unresolved"
+        return
+      }
+      token = normalized
+      sub(/^JavaVersion\.VERSION_/, "", token)
+      if (token ~ /^1_[0-9]+$/) sub(/^1_/, "", token)
+      if (token !~ /^[0-9]+$/) {
+        java_status[side] = "unresolved"
+        return
+      }
+      java_status[side] = "resolved"
+      java_value[side] = token
+    }
+    function process_statement(statement, masked, callback_index, flavor_index, release_index, default_index, compile_index, name) {
+      statement = trim(statement)
+      if (statement == "") return
+      masked = mask_strings(statement)
+
+      callback_index = callback_ancestor("flavor")
+      if (callback_index) {
+        if (has_token(statement, "applicationId") || has_token(statement, "applicationIdSuffix")) {
+          flavor_declaration_unresolved = 1
+        }
+        return
+      }
+      flavor_index = ancestor_index("flavor")
+      if (flavor_index) {
+        name = scope_name[flavor_index]
+        if (has_token(statement, "applicationIdSuffix")) {
+          mark_flavor(name, "applicationIdSuffix", statement, current_scope_is("flavor"))
+        }
+        if (has_token(statement, "applicationId")) {
+          mark_flavor(name, "applicationId", statement, current_scope_is("flavor"))
+        }
+        return
+      }
+
+      callback_index = callback_ancestor("build")
+      if (callback_index) {
+        if (has_token(statement, "applicationIdSuffix")) {
+          release_suffix_count++
+          release_suffix_status = "unresolved"
+          release_suffix_value = ""
+        }
+        if (has_token(statement, "signingConfig")) {
+          release_signing_count++
+          release_signing_status = "unknown"
+        }
+        return
+      }
+      release_index = ancestor_index("release")
+      if (release_index) {
+        if (has_token(statement, "applicationIdSuffix")) {
+          mark_release_suffix(statement, current_scope_is("release"))
+        }
+        if (has_token(statement, "signingConfig")) {
+          mark_release_signing(statement, current_scope_is("release"))
+        }
+        return
+      }
+
+      default_index = ancestor_index("default")
+      if (default_index) {
+        if (has_token(statement, "applicationId")) {
+          mark_default("applicationId", statement, current_scope_is("default"))
+        }
+        if (has_token(statement, "versionCode")) {
+          mark_default("versionCode", statement, current_scope_is("default"))
+        }
+        if (has_token(statement, "versionName")) {
+          mark_default("versionName", statement, current_scope_is("default"))
+        }
+        return
+      }
+
+      compile_index = ancestor_index("compile")
+      if (compile_index) {
+        if (has_token(statement, "sourceCompatibility")) {
+          mark_java("sourceCompatibility", statement, current_scope_is("compile"))
+        }
+        if (has_token(statement, "targetCompatibility")) {
+          mark_java("targetCompatibility", statement, current_scope_is("compile"))
+        }
+      }
+    }
+    function open_block(header, parent, name, compact_header) {
+      header = trim(header)
+      parent = scope_kind[depth]
+      depth++
+      scope_kind[depth] = "generic"
+      scope_name[depth] = ""
+
+      if (parent == "root" && compact(header) == "android") {
+        scope_kind[depth] = "android"
+        return
+      }
+      if (parent == "android") {
+        compact_header = compact(header)
+        if (compact_header == "defaultConfig") scope_kind[depth] = "default"
+        else if (compact_header == "compileOptions") scope_kind[depth] = "compile"
+        else if (compact_header == "productFlavors") {
+          scope_kind[depth] = "product_flavors"
+          product_flavors_present = 1
+        } else if (compact_header == "buildTypes") scope_kind[depth] = "build_types"
+        return
+      }
+      if (parent == "product_flavors") {
+        name = static_flavor_name(header)
+        if (name != "") {
+          scope_kind[depth] = "flavor"
+          scope_name[depth] = name
+          if (flavor_seen[name]) flavor_declaration_unresolved = 1
+          else {
+            flavor_seen[name] = 1
+            flavor_names[++flavor_name_count] = name
+          }
+        } else {
+          scope_kind[depth] = "flavor_callback"
+          compact_header = compact(header)
+          if (compact_header ~ /^(create|maybeCreate|register)\(/ ||
+              header ~ /->/) flavor_declaration_unresolved = 1
+        }
+        return
+      }
+      if (parent == "build_types") {
+        name = static_build_type_name(header)
+        if (name == "release") scope_kind[depth] = "release"
+        else if (name != "") scope_kind[depth] = "other_build_type"
+        else scope_kind[depth] = "build_callback"
+      }
+    }
+    function close_block() {
+      if (depth > 0) {
+        delete scope_kind[depth]
+        delete scope_name[depth]
+        depth--
+      }
+    }
+    function flush_statement() {
+      process_statement(buffer)
+      buffer = ""
+    }
+    BEGIN {
+      depth = 0
+      scope_kind[0] = "root"
+      release_suffix_status = "absent"
+      release_signing_status = "absent"
+    }
+    {
+      line = $0
+      for (position = 1; position <= length(line); position++) {
+        character = substr(line, position, 1)
+        next_character = substr(line, position + 1, 1)
+        if (in_block_comment) {
+          if (character == "*" && next_character == "/") {
+            in_block_comment = 0
+            position++
+          }
+          continue
+        }
+        if (quote != "") {
+          buffer = buffer character
+          if (escaped) escaped = 0
+          else if (character == "\\") escaped = 1
+          else if (character == quote) quote = ""
+          continue
+        }
+        if (character == "/" && next_character == "*") {
+          in_block_comment = 1
+          position++
+          continue
+        }
+        if (character == "/" && next_character == "/") break
+        if (character == "\"" || character == "\047") {
+          quote = character
+          buffer = buffer character
+          continue
+        }
+        if (character == "(") {
+          paren_depth++
+          buffer = buffer character
+          continue
+        }
+        if (character == ")") {
+          if (paren_depth > 0) paren_depth--
+          buffer = buffer character
+          continue
+        }
+        if (character == "[") {
+          bracket_depth++
+          buffer = buffer character
+          continue
+        }
+        if (character == "]") {
+          if (bracket_depth > 0) bracket_depth--
+          buffer = buffer character
+          continue
+        }
+        if (character == "{") {
+          open_block(buffer)
+          buffer = ""
+          paren_depth = 0
+          bracket_depth = 0
+          continue
+        }
+        if (character == "}") {
+          flush_statement()
+          close_block()
+          paren_depth = 0
+          bracket_depth = 0
+          continue
+        }
+        if (character == ";" && paren_depth == 0 && bracket_depth == 0) {
+          flush_statement()
+          continue
+        }
+        buffer = buffer character
+      }
+      if (quote != "") buffer = buffer "\n"
+      else if (paren_depth == 0 && bracket_depth == 0) flush_statement()
+      else buffer = buffer " "
+    }
+    END {
+      flush_statement()
+      for (default_index_value = 1; default_index_value <= 3; default_index_value++) {
+        if (default_index_value == 1) default_key = "applicationId"
+        else if (default_index_value == 2) default_key = "versionCode"
+        else default_key = "versionName"
+        if (default_count[default_key] == 0) default_status[default_key] = "absent"
+        print "default|" default_key "|" default_status[default_key] "|" default_value[default_key]
+      }
+
+      source_status = java_status["sourceCompatibility"]
+      target_status = java_status["targetCompatibility"]
+      if (java_count["sourceCompatibility"] == 0 && java_count["targetCompatibility"] == 0) {
+        print "java|absent|"
+      } else if ((java_count["sourceCompatibility"] == 0 || source_status == "resolved") &&
+                 (java_count["targetCompatibility"] == 0 || target_status == "resolved") &&
+                 (java_count["sourceCompatibility"] == 0 || java_count["targetCompatibility"] == 0 ||
+                  java_value["sourceCompatibility"] == java_value["targetCompatibility"])) {
+        if (java_count["sourceCompatibility"] != 0) java_result = java_value["sourceCompatibility"]
+        else java_result = java_value["targetCompatibility"]
+        print "java|resolved|" java_result
+      } else print "java|unresolved|"
+
+      print "flavor_state|" (product_flavors_present ? "present" : "absent") "|" (flavor_name_count + 0) "|" (flavor_declaration_unresolved ? 1 : 0) "|" (flavor_identity_unresolved ? 1 : 0)
+      for (flavor_index_value = 1; flavor_index_value <= flavor_name_count; flavor_index_value++) {
+        flavor_name_value = flavor_names[flavor_index_value]
+        suffix_key = flavor_name_value SUBSEP "applicationIdSuffix"
+        override_key = flavor_name_value SUBSEP "applicationId"
+        suffix_status = flavor_field_count[suffix_key] ? flavor_field_status[suffix_key] : "absent"
+        override_status = flavor_field_count[override_key] ? flavor_field_status[override_key] : "absent"
+        print "flavor|" flavor_name_value "|" suffix_status "|" flavor_field_value[suffix_key] "|" override_status "|" flavor_field_value[override_key]
+      }
+      print "release_suffix|" release_suffix_status "|" release_suffix_value
+      print "release_signing|" release_signing_status
+    }
+  ' "$gradle_path"
+}
+
 fprs_extract_agp_version() {
   local fprs_file fprs_value
   for fprs_file in \
@@ -1339,8 +1833,17 @@ fi
 
 android_gradle_plugin_version=$(fprs_extract_agp_version)
 gradle_wrapper_version=$(fprs_extract_gradle_wrapper_version)
-java_compatibility=
-[ -z "$gradle_path" ] || java_compatibility=$(fprs_extract_java_compatibility)
+android_records=
+[ -z "$gradle_path" ] || android_records=$(fprs_extract_android_records)
+
+java_record=$(printf '%s\n' "$android_records" | awk -F '|' '$1 == "java" { print; exit }')
+java_record_rest=${java_record#*|}
+java_status=${java_record_rest%%|*}
+java_compatibility=${java_record_rest#*|}
+if [ "$java_status" = unresolved ]; then
+  java_compatibility=
+  fprs_append_warning 'Java compatibility expression could not be resolved'
+fi
 
 application_id_present=false
 namespace_present=false
@@ -1350,19 +1853,51 @@ base_application_id=
 namespace=
 version_code=
 version_name=
-default_config_text=
 if [ -n "$gradle_path" ]; then
-  default_config_text=$(fprs_extract_default_config_text)
-  fprs_text_key_present "$default_config_text" applicationId && application_id_present=true
   fprs_gradle_key_present "$gradle_path" namespace && namespace_present=true
-  fprs_text_key_present "$default_config_text" versionCode && version_code_present=true
-  fprs_text_key_present "$default_config_text" versionName && version_name_present=true
-
-  base_application_id=$(fprs_extract_text_literal "$default_config_text" applicationId)
   namespace=$(fprs_extract_gradle_literal "$gradle_path" namespace)
-  version_code=$(fprs_extract_text_integer "$default_config_text" versionCode)
-  version_name=$(fprs_extract_text_literal "$default_config_text" versionName)
 fi
+
+application_record=$(printf '%s\n' "$android_records" |
+  awk -F '|' '$1 == "default" && $2 == "applicationId" { print; exit }')
+application_status=$(printf '%s\n' "$application_record" | awk -F '|' '{ print $3 }')
+application_value=$(printf '%s\n' "$application_record" | awk -F '|' '{ print $4 }')
+version_code_record=$(printf '%s\n' "$android_records" |
+  awk -F '|' '$1 == "default" && $2 == "versionCode" { print; exit }')
+version_code_status=$(printf '%s\n' "$version_code_record" | awk -F '|' '{ print $3 }')
+version_code_value=$(printf '%s\n' "$version_code_record" | awk -F '|' '{ print $4 }')
+version_name_record=$(printf '%s\n' "$android_records" |
+  awk -F '|' '$1 == "default" && $2 == "versionName" { print; exit }')
+version_name_status=$(printf '%s\n' "$version_name_record" | awk -F '|' '{ print $3 }')
+version_name_value=$(printf '%s\n' "$version_name_record" | awk -F '|' '{ print $4 }')
+
+[ -n "$application_status" ] || application_status=absent
+[ -n "$version_code_status" ] || version_code_status=absent
+[ -n "$version_name_status" ] || version_name_status=absent
+[ -n "$java_status" ] || java_status=absent
+
+[ "$application_status" = absent ] || application_id_present=true
+[ "$version_code_status" = absent ] || version_code_present=true
+[ "$version_name_status" = absent ] || version_name_present=true
+if [ "$application_status" = resolved ]; then
+  base_application_id=$application_value
+fi
+case "$version_code_status" in
+  resolved) version_code=$version_code_value ;;
+  gradle) version_code=$(fprs_read_property "$project_root/android/gradle.properties" VERSION_CODE) ;;
+  flutter)
+    version_code=$(fprs_read_property "$project_root/android/local.properties" flutter.versionCode)
+    [ -n "$version_code" ] || version_code=$pubspec_build_number
+    ;;
+esac
+case "$version_name_status" in
+  resolved) version_name=$version_name_value ;;
+  gradle) version_name=$(fprs_read_property "$project_root/android/gradle.properties" VERSION_NAME) ;;
+  flutter)
+    version_name=$(fprs_read_property "$project_root/android/local.properties" flutter.versionName)
+    [ -n "$version_name" ] || version_name=$pubspec_version_name
+    ;;
+esac
 
 if [ -n "$base_application_id" ] && ! printf '%s\n' "$base_application_id" |
   grep -E '^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$' >/dev/null 2>&1
@@ -1375,30 +1910,6 @@ then
   namespace=
 fi
 
-if [ -n "$gradle_path" ] && [ -z "$version_name" ]; then
-  version_name_source=$(fprs_extract_version_property_source "$default_config_text" name)
-  case "$version_name_source" in
-    gradle)
-      version_name=$(fprs_read_property "$project_root/android/gradle.properties" VERSION_NAME)
-      ;;
-    flutter)
-      version_name=$(fprs_read_property "$project_root/android/local.properties" flutter.versionName)
-      [ -n "$version_name" ] || version_name=$pubspec_version_name
-      ;;
-  esac
-fi
-if [ -n "$gradle_path" ] && [ -z "$version_code" ]; then
-  version_code_source=$(fprs_extract_version_property_source "$default_config_text" code)
-  case "$version_code_source" in
-    gradle)
-      version_code=$(fprs_read_property "$project_root/android/gradle.properties" VERSION_CODE)
-      ;;
-    flutter)
-      version_code=$(fprs_read_property "$project_root/android/local.properties" flutter.versionCode)
-      [ -n "$version_code" ] || version_code=$pubspec_build_number
-      ;;
-  esac
-fi
 if [ -n "$version_name" ] && ! printf '%s\n' "$version_name" |
   grep -E '^[0-9A-Za-z][0-9A-Za-z._+-]*$' >/dev/null 2>&1
 then
@@ -1420,14 +1931,21 @@ fi
   fprs_append_warning 'version name expression could not be resolved'
 
 flavor_records=
-[ -z "$gradle_path" ] || flavor_records=$(fprs_extract_flavor_records)
+[ -z "$gradle_path" ] || flavor_records=$(printf '%s\n' "$android_records" | awk -F '|' '
+  $1 == "flavor" { print $2 "|" $3 "|" $4 "|" $5 "|" $6 }
+' | LC_ALL=C sort -t '|' -k1,1)
 flavors=$(printf '%s\n' "$flavor_records" | awk -F '|' 'NF && $1 != "" { print $1 }')
 flavor_count=$(fprs_line_count "$flavors")
-product_flavor_state='absent|0|0'
-[ -z "$gradle_path" ] || product_flavor_state=$(fprs_extract_product_flavor_state)
+product_flavor_state=$(printf '%s\n' "$android_records" |
+  awk -F '|' '$1 == "flavor_state" { print; exit }')
+[ -n "$product_flavor_state" ] || product_flavor_state='flavor_state|absent|0|0|0'
 product_flavor_state_rest=${product_flavor_state#*|}
+product_flavor_presence=${product_flavor_state_rest%%|*}
+product_flavor_state_rest=${product_flavor_state_rest#*|}
 resolved_flavor_declaration_count=${product_flavor_state_rest%%|*}
-unresolved_flavor_declaration_count=${product_flavor_state_rest##*|}
+product_flavor_state_rest=${product_flavor_state_rest#*|}
+unresolved_flavor_declaration_count=${product_flavor_state_rest%%|*}
+unresolved_flavor_identity_count=${product_flavor_state_rest##*|}
 unresolved_flavor_declarations=false
 if [ "$unresolved_flavor_declaration_count" -gt 0 ] ||
   [ "$resolved_flavor_declaration_count" -ne "$flavor_count" ]
@@ -1435,6 +1953,8 @@ then
   unresolved_flavor_declarations=true
   fprs_append_warning 'product flavor declarations could not be resolved'
 fi
+unresolved_flavor_identity=false
+[ "$unresolved_flavor_identity_count" -eq 0 ] || unresolved_flavor_identity=true
 flavor_dimension_records=
 [ -z "$gradle_path" ] || flavor_dimension_records=$(fprs_extract_flavor_dimensions)
 flavor_dimensions=$(printf '%s\n' "$flavor_dimension_records" |
@@ -1450,8 +1970,9 @@ elif [ "$flavor_dimension_count" -gt 1 ]; then
 fi
 
 release_application_id_suffix_record='absent|'
-[ -z "$gradle_path" ] ||
-  release_application_id_suffix_record=$(fprs_extract_release_application_id_suffix)
+[ -z "$gradle_path" ] || release_application_id_suffix_record=$(printf '%s\n' "$android_records" |
+  awk -F '|' '$1 == "release_suffix" { print $2 "|" $3; exit }')
+[ -n "$release_application_id_suffix_record" ] || release_application_id_suffix_record='absent|'
 release_application_id_suffix_status=${release_application_id_suffix_record%%|*}
 release_application_id_suffix=${release_application_id_suffix_record#*|}
 if [ "$release_application_id_suffix_status" = unresolved ]; then
@@ -1532,6 +2053,7 @@ else
       flavor_candidate_status=unresolved
     fi
     if [ "$unresolved_flavor_declarations" = true ] ||
+      [ "$unresolved_flavor_identity" = true ] ||
       [ "$release_application_id_suffix_status" = unresolved ]
     then
       flavor_candidate_status=unresolved
@@ -1597,7 +2119,8 @@ then
 fi
 
 release_signing_reference=
-[ -z "$gradle_path" ] || release_signing_reference=$(fprs_extract_release_signing_reference)
+[ -z "$gradle_path" ] || release_signing_reference=$(printf '%s\n' "$android_records" |
+  awk -F '|' '$1 == "release_signing" { print $2; exit }')
 case "$release_signing_reference" in
   release)
     release_signing=true

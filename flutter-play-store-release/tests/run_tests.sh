@@ -1272,6 +1272,8 @@ plugins {
 }
 KOTLIN
   cat > "$inspection_project/android/app/build.gradle.kts" <<'KOTLIN'
+val unrelatedJavaDocumentation = JavaVersion.VERSION_21
+
 android {
     namespace = "com.example.kotlin"
     compileOptions {
@@ -1596,6 +1598,222 @@ GRADLE
     "$inspection_project/android/app/build.gradle" groovy
 }
 
+inspection_make_flavor_callback() {
+  inspection_project=$1
+  inspection_callback=$2
+  inspection_write_pubspec "$inspection_project" dev_dependencies
+  inspection_write_wrapper "$inspection_project" 8.7
+  cat > "$inspection_project/android/settings.gradle" <<'GRADLE'
+plugins {
+    id "com.android.application" version "8.5.2" apply false
+}
+GRADLE
+  cat > "$inspection_project/android/app/build.gradle" <<GRADLE
+android {
+    namespace "com.example.callback"
+    defaultConfig {
+        applicationId "com.example.callback"
+        versionCode 45
+        versionName "1.2.3"
+    }
+    productFlavors {
+        release {
+            applicationIdSuffix ".release"
+        }
+        $inspection_callback {
+            applicationIdSuffix ".common"
+        }
+    }
+}
+GRADLE
+  printf 'void main() {}\n' > "$inspection_project/lib/main_release.dart"
+  inspection_append_execution_canary \
+    "$inspection_project/android/app/build.gradle" groovy
+}
+
+inspection_make_flavor_identity_case() {
+  inspection_project=$1
+  inspection_identity_case=$2
+  inspection_write_pubspec "$inspection_project" dev_dependencies
+  inspection_write_wrapper "$inspection_project" 8.7
+  cat > "$inspection_project/android/settings.gradle" <<'GRADLE'
+plugins {
+    id "com.android.application" version "8.5.2" apply false
+}
+GRADLE
+  case "$inspection_identity_case" in
+    nested)
+      inspection_flavor_body='            if (enableIdentity) {
+                applicationIdSuffix ".conditional"
+            }'
+      ;;
+    inline)
+      inspection_flavor_body='            if (enableIdentity) applicationId "com.example.inline"'
+      ;;
+    duplicate)
+      inspection_flavor_body='            applicationId "com.example.first"
+            applicationId "com.example.second"'
+      ;;
+    mutation)
+      inspection_flavor_body='            applicationIdSuffix ".first"
+            applicationIdSuffix += ".later"'
+      ;;
+    *) fail 'unknown flavor identity fixture case' ;;
+  esac
+  cat > "$inspection_project/android/app/build.gradle" <<GRADLE
+android {
+    namespace "com.example.identity"
+    defaultConfig {
+        applicationId "com.example.identity"
+        versionCode 45
+        versionName "1.2.3"
+    }
+    productFlavors {
+        release {
+$inspection_flavor_body
+        }
+    }
+}
+GRADLE
+  printf 'void main() {}\n' > "$inspection_project/lib/main_release.dart"
+  inspection_append_execution_canary \
+    "$inspection_project/android/app/build.gradle" groovy
+}
+
+inspection_make_default_config_case() {
+  inspection_project=$1
+  inspection_default_case=$2
+  inspection_write_pubspec "$inspection_project" dev_dependencies
+  inspection_write_wrapper "$inspection_project" 8.7
+  cat > "$inspection_project/android/settings.gradle.kts" <<'KOTLIN'
+plugins {
+    id("com.android.application") version "8.5.2" apply false
+}
+KOTLIN
+  case "$inspection_default_case" in
+    compact)
+      inspection_default_body='    defaultConfig { applicationId = "com.example.defaults" }
+    defaultConfig { versionCode = 77 }
+    defaultConfig { versionName = "7.7.0" }'
+      ;;
+    repeated_dynamic)
+      inspection_default_body='    defaultConfig {
+        applicationId = "com.example.stale"
+        versionCode = 77
+        versionName = "7.7.0"
+    }
+    defaultConfig { applicationId = applicationIdFromEnvironment() }
+    defaultConfig { versionCode += calculateOffset() }
+    defaultConfig { if (usePreviewVersion) versionName = "8.0.0" }'
+      ;;
+    nested)
+      inspection_default_body='    defaultConfig {
+        applicationId = "com.example.stale"
+        versionCode = 77
+        versionName = "7.7.0"
+        if (useNestedDefaults) {
+            applicationId = "com.example.nested"
+            versionCode = 88
+            versionName = "8.8.0"
+        }
+    }'
+      ;;
+    *) fail 'unknown defaultConfig fixture case' ;;
+  esac
+  cat > "$inspection_project/android/app/build.gradle.kts" <<KOTLIN
+android {
+    namespace = "com.example.defaults"
+$inspection_default_body
+}
+KOTLIN
+  inspection_append_execution_canary \
+    "$inspection_project/android/app/build.gradle.kts" kotlin
+}
+
+inspection_make_java_case() {
+  inspection_project=$1
+  inspection_java_case=$2
+  inspection_write_pubspec "$inspection_project" dev_dependencies
+  inspection_write_wrapper "$inspection_project" 8.7
+  cat > "$inspection_project/android/settings.gradle.kts" <<'KOTLIN'
+plugins {
+    id("com.android.application") version "8.5.2" apply false
+}
+KOTLIN
+  case "$inspection_java_case" in
+    compact)
+      inspection_java_body='    compileOptions { sourceCompatibility = JavaVersion.VERSION_1_8; targetCompatibility = JavaVersion.VERSION_1_8 }'
+      ;;
+    later_override)
+      inspection_java_body='    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+        sourceCompatibility = javaVersionFromEnvironment()
+    }'
+      ;;
+    mixed)
+      inspection_java_body='    compileOptions {
+        sourceCompatibility = if (useModernJava) JavaVersion.VERSION_21 else JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }'
+      ;;
+    inconsistent)
+      inspection_java_body='    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_21
+    }'
+      ;;
+    *) fail 'unknown Java fixture case' ;;
+  esac
+  cat > "$inspection_project/android/app/build.gradle.kts" <<KOTLIN
+android {
+    namespace = "com.example.java"
+$inspection_java_body
+    defaultConfig {
+        applicationId = "com.example.java"
+        versionCode = 45
+        versionName = "1.2.3"
+    }
+}
+KOTLIN
+  inspection_append_execution_canary \
+    "$inspection_project/android/app/build.gradle.kts" kotlin
+}
+
+inspection_make_compact_release_case() {
+  inspection_project=$1
+  inspection_release_case=$2
+  inspection_write_pubspec "$inspection_project" dev_dependencies
+  inspection_write_wrapper "$inspection_project" 8.7
+  cat > "$inspection_project/android/settings.gradle" <<'GRADLE'
+plugins {
+    id "com.android.application" version "8.5.2" apply false
+}
+GRADLE
+  case "$inspection_release_case" in
+    static)
+      inspection_release_line='    buildTypes { release { applicationIdSuffix ".store"; signingConfig signingConfigs.upload } }'
+      ;;
+    dynamic)
+      inspection_release_line='    buildTypes { release { applicationIdSuffix ".store" + suffixFromEnvironment(); signingConfig useDebug ? signingConfigs.debug : signingConfigs.upload } }'
+      ;;
+    *) fail 'unknown compact release fixture case' ;;
+  esac
+  cat > "$inspection_project/android/app/build.gradle" <<GRADLE
+android {
+    namespace "com.example.compactrelease"
+    defaultConfig {
+        applicationId "com.example.compactrelease"
+        versionCode 45
+        versionName "1.2.3"
+    }
+$inspection_release_line
+}
+GRADLE
+  inspection_append_execution_canary \
+    "$inspection_project/android/app/build.gradle" groovy
+}
+
 inspection_assert_no_canary_logs() {
   for inspection_canary in \
     FPRS_GRADLE_SECRET_CANARY_18d90b \
@@ -1887,6 +2105,123 @@ EOF
   inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
     '"warnings":["version code expression could not be resolved","version name expression could not be resolved"]' \
     'version mutation warnings changed'
+
+  for callback_name in all configureEach
+  do
+    callback_project="$INSPECTION_ROOT/$callback_name flavor callback app"
+    inspection_make_flavor_callback "$callback_project" "$callback_name"
+    inspection_assert_status "$callback_name flavor callback inspection failed" 0 \
+      "$INSPECTOR" --project "$callback_project" --format json --flavor release
+    inspection_assert_schema "$INSPECTION_LAST_STDOUT"
+    inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+      '"application_id":null,"namespace":"com.example.callback","application_id_candidates":[]' \
+      "$callback_name flavor callback produced a concrete application ID"
+    inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+      '"flavors":["release"],"selected_flavor":"release"' \
+      "$callback_name callback was reported as a product flavor"
+    inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+      '"warnings":["product flavor declarations could not be resolved"]' \
+      "$callback_name flavor callback warning changed"
+  done
+
+  for identity_case in nested inline duplicate mutation
+  do
+    identity_project="$INSPECTION_ROOT/$identity_case flavor identity app"
+    inspection_make_flavor_identity_case "$identity_project" "$identity_case"
+    inspection_assert_status "$identity_case flavor identity inspection failed" 0 \
+      "$INSPECTOR" --project "$identity_project" --format json --flavor release
+    inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+      '"application_id":null,"namespace":"com.example.identity","application_id_candidates":[]' \
+      "$identity_case flavor identity produced a concrete application ID"
+    case "$identity_case" in
+      nested|mutation) identity_warning='application ID suffix expression could not be resolved for flavor release' ;;
+      inline|duplicate) identity_warning='application ID expression could not be resolved for flavor release' ;;
+    esac
+    inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+      "\"warnings\":[\"$identity_warning\"]" \
+      "$identity_case flavor identity warning changed"
+  done
+
+  compact_defaults_project="$INSPECTION_ROOT/compact default config app"
+  inspection_make_default_config_case "$compact_defaults_project" compact
+  inspection_assert_status 'compact defaultConfig inspection failed' 0 \
+    "$INSPECTOR" --project "$compact_defaults_project" --format json
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"application_id":"com.example.defaults","namespace":"com.example.defaults","application_id_candidates":["com.example.defaults"]' \
+    'compact defaultConfig application ID was not resolved'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"version_name":"7.7.0","version_code":"77"' \
+    'compact defaultConfig versions were not resolved'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"warnings":[],"failures":[]' \
+    'compact defaultConfig emitted warnings'
+
+  for default_case in repeated_dynamic nested
+  do
+    default_project="$INSPECTION_ROOT/$default_case default config app"
+    inspection_make_default_config_case "$default_project" "$default_case"
+    inspection_assert_status "$default_case defaultConfig inspection failed" 0 \
+      "$INSPECTOR" --project "$default_project" --format json
+    inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+      '"application_id":null,"namespace":"com.example.defaults","application_id_candidates":[]' \
+      "$default_case defaultConfig returned a stale application ID"
+    inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+      '"version_name":null,"version_code":null' \
+      "$default_case defaultConfig returned stale versions"
+    inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+      '"warnings":["application ID expression could not be resolved","version code expression could not be resolved","version name expression could not be resolved"]' \
+      "$default_case defaultConfig warnings changed"
+  done
+
+  compact_java_project="$INSPECTION_ROOT/compact Java compatibility app"
+  inspection_make_java_case "$compact_java_project" compact
+  inspection_assert_status 'compact Java compatibility inspection failed' 0 \
+    "$INSPECTOR" --project "$compact_java_project" --format json
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"java_compatibility":"8"' \
+    'compact Java 8 compatibility was not normalized'
+
+  for java_case in later_override mixed inconsistent
+  do
+    java_project="$INSPECTION_ROOT/$java_case Java compatibility app"
+    inspection_make_java_case "$java_project" "$java_case"
+    inspection_assert_status "$java_case Java compatibility inspection failed" 0 \
+      "$INSPECTOR" --project "$java_project" --format json
+    inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+      '"java_compatibility":null' \
+      "$java_case Java compatibility returned a concrete version"
+    inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+      '"warnings":["Java compatibility expression could not be resolved"]' \
+      "$java_case Java compatibility warning changed"
+  done
+
+  compact_release_project="$INSPECTION_ROOT/compact static release app"
+  inspection_make_compact_release_case "$compact_release_project" static
+  inspection_assert_status 'compact static release inspection failed' 0 \
+    "$INSPECTOR" --project "$compact_release_project" --format json
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"application_id":"com.example.compactrelease.store","namespace":"com.example.compactrelease","application_id_candidates":["com.example.compactrelease.store"]' \
+    'compact static release suffix was not resolved'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"release_signing":true,"release_uses_debug_signing":false' \
+    'compact static release signing was not resolved'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"warnings":[],"failures":[]' \
+    'compact static release emitted warnings'
+
+  compact_dynamic_release_project="$INSPECTION_ROOT/compact dynamic release app"
+  inspection_make_compact_release_case "$compact_dynamic_release_project" dynamic
+  inspection_assert_status 'compact dynamic release inspection failed' 0 \
+    "$INSPECTOR" --project "$compact_dynamic_release_project" --format json
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"application_id":null,"namespace":"com.example.compactrelease","application_id_candidates":[]' \
+    'compact dynamic release produced a concrete application ID'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"release_signing":false,"release_uses_debug_signing":false' \
+    'compact conditional release signing produced a false green'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"warnings":["release application ID suffix expression could not be resolved","release signing expression could not be resolved"]' \
+    'compact dynamic release warnings changed'
 
   multidimension_project="$INSPECTION_ROOT/multiple flavor dimensions app"
   inspection_make_multidimension "$multidimension_project"

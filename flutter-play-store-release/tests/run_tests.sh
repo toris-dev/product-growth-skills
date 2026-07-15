@@ -28,6 +28,7 @@ fail() {
 assert_file() {
   relative_path=$1
   [ -f "$PACKAGE_ROOT/$relative_path" ] || fail "missing target: $relative_path"
+  [ ! -L "$PACKAGE_ROOT/$relative_path" ] || fail "target must not be a symlink: $relative_path"
   [ -s "$PACKAGE_ROOT/$relative_path" ] || fail "empty target: $relative_path"
 }
 
@@ -93,41 +94,35 @@ update.sh
 FILES
 }
 
-write_expected_manifest() {
-  cat > "$TMP_ROOT/expected-manifest.txt" <<'FILES'
-.skill-package-id
-README.md
-SKILL.md
-agents/openai.yaml
-install-manifest.txt
-install.sh
-references/environment-variables.md
-references/execution-defaults.md
-references/first-release-checklist.md
-references/troubleshooting.md
-scripts/bootstrap_android_fastlane.sh
-scripts/decode_secret.sh
-scripts/encode_secret.sh
-scripts/inspect_flutter_project.sh
-scripts/install_flutter_sdk.sh
-scripts/lib/common.sh
-scripts/lib/gradle_signing.sh
-scripts/lib/package_sync.sh
-scripts/lib/project_transaction.sh
-scripts/validate_release_setup.sh
-templates/Appfile
-templates/Fastfile
-templates/FlutterPlayStoreRelease.rb
-templates/Gemfile
-templates/Gemfile.lock
-templates/PLAY_STORE_RELEASE.md
-templates/Pluginfile
-templates/env.example
-templates/key.properties.example
-templates/release-android.yml
-uninstall.sh
-update.sh
-FILES
+inventory_package_files() {
+  if ! (
+    CDPATH= cd -- "$PACKAGE_ROOT" &&
+      find . \( -type f -o -type l \) -print
+  ) > "$TMP_ROOT/package-files-with-prefix.txt"; then
+    fail 'could not inventory canonical package files'
+  fi
+
+  sed 's#^\./##' "$TMP_ROOT/package-files-with-prefix.txt" |
+    LC_ALL=C sort > "$TMP_ROOT/actual-package-files.txt"
+
+  # Runtime-generated fixtures are canonical-only test data, not package targets.
+  grep -v '^tests/fixtures/' "$TMP_ROOT/actual-package-files.txt" \
+    > "$TMP_ROOT/actual-declared-files.txt"
+  LC_ALL=C sort -u "$TMP_ROOT/target-files.txt" \
+    > "$TMP_ROOT/expected-declared-files.txt"
+
+  missing_path=$(LC_ALL=C comm -23 \
+    "$TMP_ROOT/expected-declared-files.txt" \
+    "$TMP_ROOT/actual-declared-files.txt" | sed -n '1p')
+  [ -z "$missing_path" ] || fail "missing target: $missing_path"
+
+  unexpected_path=$(LC_ALL=C comm -13 \
+    "$TMP_ROOT/expected-declared-files.txt" \
+    "$TMP_ROOT/actual-declared-files.txt" | sed -n '1p')
+  [ -z "$unexpected_path" ] || fail "unexpected package file: $unexpected_path"
+
+  grep -v '^tests/' "$TMP_ROOT/actual-package-files.txt" \
+    > "$TMP_ROOT/actual-runtime-files.txt"
 }
 
 package_contract() {
@@ -136,6 +131,7 @@ package_contract() {
   while IFS= read -r relative_path; do
     assert_file "$relative_path"
   done < "$TMP_ROOT/target-files.txt"
+  inventory_package_files
 
   printf '%s\n' \
     'package_id=flutter-play-store-release' \
@@ -195,12 +191,6 @@ YAML
     assert_executable "$relative_path"
   done
 
-  write_expected_manifest
-  assert_same_file \
-    "$TMP_ROOT/expected-manifest.txt" \
-    "$PACKAGE_ROOT/install-manifest.txt" \
-    'install-manifest.txt must list every runtime file in lexical order'
-
   LC_ALL=C sort "$PACKAGE_ROOT/install-manifest.txt" > "$TMP_ROOT/sorted-manifest.txt"
   assert_same_file \
     "$TMP_ROOT/sorted-manifest.txt" \
@@ -220,6 +210,11 @@ YAML
   if grep -E '(^|/)(\.git|\.svn|\.hg|\.idea|\.vscode|__pycache__|\.pytest_cache|\.dart_tool|node_modules|build|dist)(/|$)|(^|/)\.env($|\.)|(^|/)[^/]*(\.jks|\.keystore|\.p12|\.pem|\.key)$' "$PACKAGE_ROOT/install-manifest.txt" >/dev/null 2>&1; then
     fail 'install-manifest.txt contains VCS, cache, editor, generated, or secret-shaped paths'
   fi
+
+  assert_same_file \
+    "$TMP_ROOT/actual-runtime-files.txt" \
+    "$PACKAGE_ROOT/install-manifest.txt" \
+    'install-manifest.txt must exactly match the actual runtime file inventory'
 
   while IFS= read -r relative_path; do
     case "$relative_path" in

@@ -683,6 +683,42 @@ fprs_extract_android_records() {
       }
       return 0
     }
+    function callback_field_write(value, key, masked, token_pattern, offset, segment, start, before, after, masked_rest, operator_rest, raw_rest, immediate, first, inner) {
+      if (qualified_field_write(value, key)) return 1
+      masked = mask_strings(value)
+      token_pattern = key "([^A-Za-z0-9_]|$)"
+      offset = 1
+      while (offset <= length(masked)) {
+        segment = substr(masked, offset)
+        if (!match(segment, token_pattern)) return 0
+        start = offset + RSTART - 1
+        before = substr(masked, start - 1, 1)
+        if (start == 1 || before !~ /[A-Za-z0-9_.]/) {
+          after = start + length(key)
+          masked_rest = substr(masked, after)
+          operator_rest = masked_rest
+          sub(/^[[:space:]]+/, "", operator_rest)
+          if (operator_rest ~ /^[+*\/%&|^-]?=([^=]|$)/ ||
+              operator_rest ~ /^\.set[[:space:]]*\(/) return 1
+
+          raw_rest = substr(value, after)
+          immediate = substr(masked_rest, 1, 1)
+          sub(/^[[:space:]]+/, "", raw_rest)
+          first = substr(raw_rest, 1, 1)
+          if (first == "(") {
+            inner = substr(raw_rest, 2)
+            sub(/^[[:space:]]+/, "", inner)
+            if (inner != "" && substr(inner, 1, 1) != ")") return 1
+          } else if (immediate ~ /[[:space:]]/ &&
+                     first ~ /["\047A-Za-z0-9_]/ &&
+                     raw_rest !~ /^(as|in|is|instanceof)([^A-Za-z0-9_]|$)/) {
+            return 1
+          }
+        }
+        offset = start + 1
+      }
+      return 0
+    }
     function qualified_product_container(value, code) {
       code = compact(mask_strings(value))
       return code ~ /(^|[^A-Za-z0-9_])productFlavors(\.|\[)/
@@ -776,7 +812,8 @@ fprs_extract_android_records() {
 
       callback_index = callback_ancestor("flavor")
       if (callback_index) {
-        if (has_token(statement, "applicationId") || has_token(statement, "applicationIdSuffix")) {
+        if (callback_field_write(statement, "applicationId") ||
+            callback_field_write(statement, "applicationIdSuffix")) {
           flavor_declaration_unresolved = 1
         }
         return

@@ -1601,9 +1601,20 @@ GRADLE
 inspection_make_flavor_callback() {
   inspection_project=$1
   inspection_callback=$2
-  case "$inspection_callback" in
-    each|forEach) inspection_callback_header="$inspection_callback { flavor ->" ;;
-    *) inspection_callback_header="$inspection_callback {" ;;
+  inspection_callback_mode=${3:-mutation}
+  case "$inspection_callback_mode" in
+    read_only)
+      inspection_callback_header="$inspection_callback { flavor ->"
+      inspection_callback_statement='println flavor.applicationIdSuffix'
+      ;;
+    mutation)
+      case "$inspection_callback" in
+        each|forEach) inspection_callback_header="$inspection_callback { flavor ->" ;;
+        *) inspection_callback_header="$inspection_callback {" ;;
+      esac
+      inspection_callback_statement='applicationIdSuffix ".common"'
+      ;;
+    *) fail 'unknown flavor callback fixture mode' ;;
   esac
   inspection_write_pubspec "$inspection_project" dev_dependencies
   inspection_write_wrapper "$inspection_project" 8.7
@@ -1625,7 +1636,7 @@ android {
             applicationIdSuffix ".release"
         }
         $inspection_callback_header
-            applicationIdSuffix ".common"
+            $inspection_callback_statement
         }
     }
 }
@@ -2256,6 +2267,20 @@ EOF
       '"warnings":["product flavor declarations could not be resolved"]' \
       "$callback_name flavor callback warning changed"
   done
+
+  read_only_callback_project="$INSPECTION_ROOT/read-only flavor callback app"
+  inspection_make_flavor_callback "$read_only_callback_project" all read_only
+  inspection_assert_status 'read-only flavor callback inspection failed' 0 \
+    "$INSPECTOR" --project "$read_only_callback_project" --format json --flavor release
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"application_id":"com.example.callback.release","namespace":"com.example.callback","application_id_candidates":["com.example.callback.release"]' \
+    'read-only flavor callback poisoned release identity'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"flavors":["release"],"selected_flavor":"release"' \
+    'read-only flavor callback changed flavor discovery'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"warnings":[],"failures":[]' \
+    'read-only flavor callback emitted a warning'
 
   qualified_default_project="$INSPECTION_ROOT/qualified default version app"
   inspection_make_qualified_write_case "$qualified_default_project" default_version

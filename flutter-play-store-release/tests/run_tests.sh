@@ -2720,6 +2720,50 @@ project_transaction() {
     fail 'physical containment refusal did not return status 2'
   fprs_project_transaction_abort || fail 'containment transaction abort failed'
 
+  transaction_lexical_root="$TMP_ROOT/project transaction/lexical aliases"
+  mkdir -p "$transaction_lexical_root/a" "$transaction_lexical_root/b"
+  printf 'pre-existing victim\r\n' > "$transaction_lexical_root/b/victim.txt"
+  cp "$transaction_lexical_root/b/victim.txt" "$TMP_ROOT/lexical-victim.expected"
+  fprs_project_transaction_begin "$transaction_lexical_root" ||
+    fail 'lexical-alias transaction begin failed'
+  if fprs_project_transaction_register 'a/../b/victim.txt' "$TRANSACTION_CANDIDATE"; then
+    fail 'transaction accepted an internal parent traversal segment'
+  else
+    transaction_status=$?
+  fi
+  [ "$transaction_status" -eq 2 ] ||
+    fail 'internal parent traversal did not return status 2'
+  fprs_project_transaction_abort || fail 'lexical-alias transaction abort failed'
+  assert_same_file "$TMP_ROOT/lexical-victim.expected" \
+    "$transaction_lexical_root/b/victim.txt" \
+    'lexical alias registration changed a pre-existing victim'
+  for transaction_bad_relative in 'a/./victim.txt' 'a//victim.txt' './victim.txt' 'a/'
+  do
+    fprs_project_transaction_begin "$transaction_lexical_root" ||
+      fail 'ambiguous-relative transaction begin failed'
+    if fprs_project_transaction_register "$transaction_bad_relative" \
+      "$TRANSACTION_CANDIDATE"
+    then
+      fail "transaction accepted ambiguous relative path: $transaction_bad_relative"
+    fi
+    fprs_project_transaction_abort || fail 'ambiguous-relative transaction abort failed'
+  done
+
+  trap 'printf prior-hup >/dev/null' HUP
+  trap 'printf prior-int >/dev/null' INT
+  trap 'printf prior-term >/dev/null' TERM
+  transaction_prior_hup=$(trap -p HUP)
+  transaction_prior_int=$(trap -p INT)
+  transaction_prior_term=$(trap -p TERM)
+  fprs_project_transaction_begin "$transaction_lexical_root" ||
+    fail 'trap-preservation transaction begin failed'
+  fprs_project_transaction_abort || fail 'trap-preservation abort failed'
+  [ "$(trap -p HUP)" = "$transaction_prior_hup" ] &&
+    [ "$(trap -p INT)" = "$transaction_prior_int" ] &&
+    [ "$(trap -p TERM)" = "$transaction_prior_term" ] ||
+    fail 'transaction did not restore prior signal traps exactly'
+  trap - HUP INT TERM
+
   transaction_race_root="$TMP_ROOT/project transaction/race"
   mkdir -p "$transaction_race_root"
   fprs_project_transaction_begin "$transaction_race_root" ||
@@ -2753,6 +2797,147 @@ project_transaction() {
   fprs_project_transaction_abort || fail 'validation transaction abort failed'
   [ "$(cat "$transaction_race_root/validation.txt")" = 'validation original' ] ||
     fail 'candidate validation failure changed the project'
+
+  transaction_late_root="$TMP_ROOT/project transaction/late target"
+  mkdir -p "$transaction_late_root"
+  printf 'first original\n' > "$transaction_late_root/first.txt"
+  printf 'first replacement\n' > "$TMP_ROOT/late-first.candidate"
+  printf 'late replacement\n' > "$TMP_ROOT/late-second.candidate"
+  fprs_project_transaction_test_hook() {
+    [ "$1" = project-before-target-validation ] || return 0
+    [ "$2" = late.txt ] || return 0
+    printf 'late user-owned bytes\r\n' > "$transaction_late_root/late.txt"
+    chmod 604 "$transaction_late_root/late.txt"
+  }
+  fprs_project_transaction_begin "$transaction_late_root" ||
+    fail 'late-target transaction begin failed'
+  fprs_project_transaction_register first.txt "$TMP_ROOT/late-first.candidate" ||
+    fail 'late-target first registration failed'
+  fprs_project_transaction_register late.txt "$TMP_ROOT/late-second.candidate" ||
+    fail 'late-target second registration failed'
+  fprs_project_transaction_validate || fail 'late-target global validation failed'
+  if FPRS_TEST_MODE=1 fprs_project_transaction_commit; then
+    fail 'transaction overwrote a late-created untracked target'
+  else
+    transaction_status=$?
+  fi
+  [ "$transaction_status" -eq 3 ] ||
+    fail 'late-created target refusal did not return transaction status 3'
+  [ "$(cat "$transaction_late_root/first.txt")" = 'first original' ] ||
+    fail 'late-target refusal did not roll back an earlier write'
+  printf 'late user-owned bytes\r\n' > "$TMP_ROOT/late-user.expected"
+  assert_same_file "$TMP_ROOT/late-user.expected" \
+    "$transaction_late_root/late.txt" \
+    'late-created untracked target was not preserved byte-for-byte'
+  assert_mode 604 "$transaction_late_root/late.txt" \
+    'late-created untracked target mode changed'
+  unset -f fprs_project_transaction_test_hook
+
+  transaction_late_change_root="$TMP_ROOT/project transaction/late changed target"
+  mkdir -p "$transaction_late_change_root"
+  printf 'first original\n' > "$transaction_late_change_root/first.txt"
+  printf 'tracked original\r\n' > "$transaction_late_change_root/tracked.txt"
+  chmod 640 "$transaction_late_change_root/tracked.txt"
+  fprs_project_transaction_test_hook() {
+    [ "$1" = project-before-target-validation ] || return 0
+    [ "$2" = tracked.txt ] || return 0
+    printf 'late user edit\r\n' > "$transaction_late_change_root/tracked.txt"
+    chmod 604 "$transaction_late_change_root/tracked.txt"
+  }
+  fprs_project_transaction_begin "$transaction_late_change_root" ||
+    fail 'late-change transaction begin failed'
+  fprs_project_transaction_register first.txt "$TMP_ROOT/late-first.candidate" ||
+    fail 'late-change first registration failed'
+  fprs_project_transaction_register tracked.txt "$TMP_ROOT/late-second.candidate" ||
+    fail 'late-change tracked registration failed'
+  fprs_project_transaction_validate || fail 'late-change global validation failed'
+  if FPRS_TEST_MODE=1 fprs_project_transaction_commit; then
+    fail 'transaction overwrote a late modification to a tracked target'
+  else
+    transaction_status=$?
+  fi
+  [ "$transaction_status" -eq 3 ] ||
+    fail 'late-modified target refusal did not return transaction status 3'
+  [ "$(cat "$transaction_late_change_root/first.txt")" = 'first original' ] ||
+    fail 'late-modified target refusal did not roll back an earlier write'
+  printf 'late user edit\r\n' > "$TMP_ROOT/late-user-edit.expected"
+  assert_same_file "$TMP_ROOT/late-user-edit.expected" \
+    "$transaction_late_change_root/tracked.txt" \
+    'late modification was not preserved byte-for-byte'
+  assert_mode 604 "$transaction_late_change_root/tracked.txt" \
+    'late-modified target mode changed'
+  unset -f fprs_project_transaction_test_hook
+
+  transaction_swap_root="$TMP_ROOT/project transaction/parent swap"
+  transaction_swap_outside="$TMP_ROOT/project transaction/parent swap outside"
+  mkdir -p "$transaction_swap_root/safe" "$transaction_swap_outside"
+  printf 'swap candidate\n' > "$TMP_ROOT/swap.candidate"
+  fprs_project_transaction_test_hook() {
+    [ "$1" = project-before-publish ] || return 0
+    [ "$2" = safe/victim.txt ] || return 0
+    mv "$transaction_swap_root/safe" "$transaction_swap_root/safe-pinned"
+    ln -s "$transaction_swap_outside" "$transaction_swap_root/safe"
+  }
+  fprs_project_transaction_begin "$transaction_swap_root" ||
+    fail 'parent-swap transaction begin failed'
+  fprs_project_transaction_register safe/victim.txt "$TMP_ROOT/swap.candidate" ||
+    fail 'parent-swap target registration failed'
+  fprs_project_transaction_validate || fail 'parent-swap validation failed'
+  if FPRS_TEST_MODE=1 fprs_project_transaction_commit; then
+    fail 'transaction published through a swapped parent path'
+  else
+    transaction_status=$?
+  fi
+  [ "$transaction_status" -eq 3 ] ||
+    fail 'parent-swap refusal did not return transaction status 3'
+  [ ! -e "$transaction_swap_outside/victim.txt" ] ||
+    fail 'parent swap escaped the selected physical root'
+  [ ! -e "$transaction_swap_root/safe-pinned/victim.txt" ] ||
+    fail 'parent-swap refusal left an installed target in the pinned directory'
+  if find "$transaction_swap_root/safe-pinned" -name '.fprs-project-write.*' -print |
+    grep . >/dev/null 2>&1
+  then
+    fail 'parent-swap refusal left an invocation-owned temporary file'
+  fi
+  rm "$transaction_swap_root/safe"
+  mv "$transaction_swap_root/safe-pinned" "$transaction_swap_root/safe"
+  unset -f fprs_project_transaction_test_hook
+
+  transaction_ancestor_root="$TMP_ROOT/project transaction/ancestor swap"
+  transaction_ancestor_outside="$TMP_ROOT/project transaction/ancestor swap outside"
+  mkdir -p "$transaction_ancestor_root/outer/safe" \
+    "$transaction_ancestor_outside/safe"
+  fprs_project_transaction_test_hook() {
+    [ "$1" = project-before-publish ] || return 0
+    [ "$2" = outer/safe/victim.txt ] || return 0
+    mv "$transaction_ancestor_root/outer" \
+      "$transaction_ancestor_root/outer-pinned"
+    ln -s "$transaction_ancestor_outside" "$transaction_ancestor_root/outer"
+  }
+  fprs_project_transaction_begin "$transaction_ancestor_root" ||
+    fail 'ancestor-swap transaction begin failed'
+  fprs_project_transaction_register outer/safe/victim.txt "$TMP_ROOT/swap.candidate" ||
+    fail 'ancestor-swap target registration failed'
+  fprs_project_transaction_validate || fail 'ancestor-swap validation failed'
+  if FPRS_TEST_MODE=1 fprs_project_transaction_commit; then
+    fail 'transaction published through a swapped ancestor path'
+  else
+    transaction_status=$?
+  fi
+  [ "$transaction_status" -eq 3 ] ||
+    fail 'ancestor-swap refusal did not return transaction status 3'
+  [ ! -e "$transaction_ancestor_outside/safe/victim.txt" ] ||
+    fail 'ancestor swap escaped the selected physical root'
+  [ ! -e "$transaction_ancestor_root/outer-pinned/safe/victim.txt" ] ||
+    fail 'ancestor-swap refusal installed a target in the pinned directory'
+  if find "$transaction_ancestor_root/outer-pinned" \
+    -name '.fprs-project-write.*' -print | grep . >/dev/null 2>&1
+  then
+    fail 'ancestor-swap refusal left an invocation-owned temporary file'
+  fi
+  rm "$transaction_ancestor_root/outer"
+  mv "$transaction_ancestor_root/outer-pinned" "$transaction_ancestor_root/outer"
+  unset -f fprs_project_transaction_test_hook
 
   transaction_failure_root="$TMP_ROOT/project transaction/failure rollback"
   mkdir -p "$transaction_failure_root/data"
@@ -2846,6 +3031,56 @@ SH
   assert_mode 640 "$transaction_signal_root/existing.txt" \
     'signal rollback changed original mode'
 
+  transaction_boundary_helper="$TMP_ROOT/project transaction/boundary-helper.sh"
+  cat > "$transaction_boundary_helper" <<'SH'
+#!/usr/bin/env bash
+set -u
+. "$1"
+root=$2
+candidate=$3
+boundary=$4
+case "$boundary" in
+  project-dir-created) relative='nested/path/created.txt' ;;
+  *) relative='existing.txt' ;;
+esac
+fprs_project_transaction_begin "$root" || exit $?
+fprs_project_transaction_register "$relative" "$candidate" || exit $?
+fprs_project_transaction_validate || exit $?
+FPRS_TEST_MODE=1 FPRS_TEST_SIGNAL_AT=$boundary fprs_project_transaction_commit
+SH
+  chmod 700 "$transaction_boundary_helper"
+  for transaction_boundary in project-dir-created project-temp-created project-published
+  do
+    transaction_boundary_root="$TMP_ROOT/project transaction/boundary $transaction_boundary"
+    mkdir -p "$transaction_boundary_root"
+    printf 'boundary original\r\n' > "$transaction_boundary_root/existing.txt"
+    chmod 640 "$transaction_boundary_root/existing.txt"
+    cp "$transaction_boundary_root/existing.txt" "$TMP_ROOT/boundary.expected"
+    if /bin/bash "$transaction_boundary_helper" "$TRANSACTION_LIBRARY" \
+      "$transaction_boundary_root" "$TMP_ROOT/signal.candidate" \
+      "$transaction_boundary" > "$TMP_ROOT/boundary.stdout" \
+      2> "$TMP_ROOT/boundary.stderr"
+    then
+      fail "transaction signal boundary unexpectedly succeeded: $transaction_boundary"
+    else
+      transaction_status=$?
+    fi
+    [ "$transaction_status" -eq 3 ] ||
+      fail "transaction signal boundary did not return 3: $transaction_boundary"
+    assert_same_file "$TMP_ROOT/boundary.expected" \
+      "$transaction_boundary_root/existing.txt" \
+      "signal boundary changed original bytes: $transaction_boundary"
+    assert_mode 640 "$transaction_boundary_root/existing.txt" \
+      "signal boundary changed original mode: $transaction_boundary"
+    [ ! -e "$transaction_boundary_root/nested" ] ||
+      fail "signal boundary left a created directory: $transaction_boundary"
+    if find "$transaction_boundary_root" -name '.fprs-project-write.*' -print |
+      grep . >/dev/null 2>&1
+    then
+      fail "signal boundary left a same-directory temp: $transaction_boundary"
+    fi
+  done
+
   if grep -E 'git[[:space:]]+(checkout|restore|reset)' \
     "$TRANSACTION_LIBRARY" >/dev/null 2>&1
   then
@@ -2874,6 +3109,30 @@ GRADLE
   . "$GRADLE_LIBRARY"
   type fprs_gradle_signing_candidate >/dev/null 2>&1 ||
     fail 'missing Gradle candidate function'
+  cp "$GRADLE_SOURCE" "$GRADLE_ROOT/alias-source.expected"
+  ln "$GRADLE_SOURCE" "$GRADLE_ROOT/source-hardlink.gradle"
+  if fprs_gradle_signing_candidate groovy "$GRADLE_SOURCE" \
+    "$GRADLE_ROOT/source-hardlink.gradle"; then
+    fail 'Gradle planner accepted a hardlink output alias to its source'
+  else
+    gradle_status=$?
+  fi
+  [ "$gradle_status" -eq 2 ] ||
+    fail 'Gradle hardlink output alias did not return status 2'
+  assert_same_file "$GRADLE_ROOT/alias-source.expected" "$GRADLE_SOURCE" \
+    'Gradle hardlink output alias mutated the source'
+  ln -s "$GRADLE_SOURCE" "$GRADLE_ROOT/source-symlink.gradle"
+  if fprs_gradle_signing_candidate groovy "$GRADLE_SOURCE" \
+    "$GRADLE_ROOT/source-symlink.gradle"; then
+    fail 'Gradle planner accepted a symlink output alias to its source'
+  fi
+  printf 'unrelated candidate owner\n' > "$GRADLE_ROOT/existing-output.gradle"
+  if fprs_gradle_signing_candidate groovy "$GRADLE_SOURCE" \
+    "$GRADLE_ROOT/existing-output.gradle"; then
+    fail 'Gradle planner accepted an unsafe pre-existing output'
+  fi
+  [ "$(cat "$GRADLE_ROOT/existing-output.gradle")" = 'unrelated candidate owner' ] ||
+    fail 'Gradle planner changed an unsafe pre-existing output'
   fprs_gradle_signing_candidate groovy "$GRADLE_SOURCE" \
     "$GRADLE_CANDIDATE" || fail 'Groovy Gradle candidate generation failed'
   grep -F 'BEGIN flutter-play-store-release schema=1' \
@@ -3060,6 +3319,51 @@ GRADLE
   fi
 
   cat > "$gradle_conflict_source" <<'GRADLE'
+/*
+// BEGIN flutter-play-store-release schema=1
+// END flutter-play-store-release
+android {
+    buildTypes { release { signingConfig signingConfigs.debug } }
+}
+*/
+def documentation = """
+android {
+    // BEGIN flutter-play-store-release schema=1
+    buildTypes { release { signingConfig signingConfigs.debug } }
+    // END flutter-play-store-release
+}
+"""
+android {
+}
+GRADLE
+  fprs_gradle_signing_candidate groovy "$gradle_conflict_source" \
+    "$GRADLE_ROOT/comment-string.candidate" ||
+    fail 'marker/scope text inside comments or multiline strings caused a conflict'
+  grep -F 'def documentation = """' "$GRADLE_ROOT/comment-string.candidate" \
+    >/dev/null 2>&1 || fail 'Gradle planner did not preserve multiline user text'
+
+  cat > "$gradle_conflict_source" <<'GRADLE'
+android {
+    buildTypes {
+        release {
+        }
+    }
+    buildTypes {
+        release {
+        }
+    }
+}
+GRADLE
+  if fprs_gradle_signing_candidate groovy "$gradle_conflict_source" \
+    "$GRADLE_ROOT/multiple-release.candidate"; then
+    fail 'multiple structural release scopes were accepted'
+  else
+    gradle_status=$?
+  fi
+  [ "$gradle_status" -eq 2 ] ||
+    fail 'multiple release scopes did not return status 2'
+
+  cat > "$gradle_conflict_source" <<'GRADLE'
 // android { }
 android {
 }
@@ -3069,6 +3373,74 @@ GRADLE
   if fprs_gradle_signing_candidate groovy "$gradle_conflict_source" \
     "$GRADLE_ROOT/multiple-android.candidate"; then
     fail 'multiple structural android scopes were accepted'
+  fi
+
+  type fprs_gradle_signing_task_requires_credentials >/dev/null 2>&1 ||
+    fail 'missing pure Gradle release-task guard helper'
+  type fprs_gradle_signing_properties_path >/dev/null 2>&1 ||
+    fail 'missing pure key-properties path helper'
+  type fprs_gradle_signing_guard_check >/dev/null 2>&1 ||
+    fail 'missing pure signing credential guard helper'
+  for gradle_nonrelease_task in help tasks properties assembleDebug bundleQaDebug testDebugUnitTest lintRelease
+  do
+    if fprs_gradle_signing_task_requires_credentials "$gradle_nonrelease_task"; then
+      fail "non-signing task required release credentials: $gradle_nonrelease_task"
+    fi
+  done
+  for gradle_release_task in :app:bundleRelease assembleProdRelease publishReleaseBundle
+  do
+    fprs_gradle_signing_task_requires_credentials "$gradle_release_task" ||
+      fail "release signing task bypassed credentials: $gradle_release_task"
+  done
+  gradle_guard_root="$GRADLE_ROOT/guard project/android"
+  mkdir -p "$gradle_guard_root/app"
+  gradle_fallback_path=$(unset ANDROID_KEY_PROPERTIES_PATH; \
+    fprs_gradle_signing_properties_path "$gradle_guard_root") ||
+    fail 'key-properties fallback resolution failed'
+  [ "$gradle_fallback_path" = "$gradle_guard_root/key.properties" ] ||
+    fail 'key-properties fallback did not resolve under the Android root'
+  gradle_override_path=$(ANDROID_KEY_PROPERTIES_PATH="$GRADLE_ROOT/override.properties" \
+    fprs_gradle_signing_properties_path "$gradle_guard_root") ||
+    fail 'key-properties override resolution failed'
+  [ "$gradle_override_path" = "$GRADLE_ROOT/override.properties" ] ||
+    fail 'ANDROID_KEY_PROPERTIES_PATH did not take precedence'
+  if ! fprs_gradle_signing_guard_check assembleDebug \
+    "$GRADLE_ROOT/missing.properties" "$gradle_guard_root/app" \
+    > "$GRADLE_ROOT/debug-guard.stdout" 2> "$GRADLE_ROOT/debug-guard.stderr"
+  then
+    fail 'debug task required missing release credentials'
+  fi
+  assert_empty_file "$GRADLE_ROOT/debug-guard.stdout" \
+    'debug signing guard wrote output'
+  assert_empty_file "$GRADLE_ROOT/debug-guard.stderr" \
+    'debug signing guard emitted a credential diagnostic'
+  if fprs_gradle_signing_guard_check bundleRelease \
+    "$GRADLE_ROOT/missing.properties" "$gradle_guard_root/app" \
+    > "$GRADLE_ROOT/release-guard.stdout" 2> "$GRADLE_ROOT/release-guard.stderr"
+  then
+    fail 'release task accepted missing signing properties'
+  fi
+  grep -F 'release signing properties file is missing' \
+    "$GRADLE_ROOT/release-guard.stderr" >/dev/null 2>&1 ||
+    fail 'release signing guard omitted a redacted missing-file diagnostic'
+  printf 'keystore bytes\n' > "$GRADLE_ROOT/upload.jks"
+  cat > "$GRADLE_ROOT/valid.properties" <<PROPERTIES
+storeFile=$GRADLE_ROOT/upload.jks
+storePassword=FPRS_STORE_PASSWORD_CANARY_ef52
+keyAlias=FPRS_ALIAS_CANARY_6b31
+keyPassword=FPRS_KEY_PASSWORD_CANARY_91ad
+PROPERTIES
+  fprs_gradle_signing_guard_check publishReleaseBundle \
+    "$GRADLE_ROOT/valid.properties" "$gradle_guard_root/app" \
+    > "$GRADLE_ROOT/valid-guard.stdout" 2> "$GRADLE_ROOT/valid-guard.stderr" ||
+    fail 'release task rejected complete signing credentials'
+  assert_empty_file "$GRADLE_ROOT/valid-guard.stdout" \
+    'valid signing guard wrote output'
+  assert_empty_file "$GRADLE_ROOT/valid-guard.stderr" \
+    'valid signing guard wrote a diagnostic'
+  if grep -R -E 'FPRS_(STORE_PASSWORD|ALIAS|KEY_PASSWORD)_CANARY' \
+    "$GRADLE_ROOT"/*.stderr "$GRADLE_ROOT"/*.stdout >/dev/null 2>&1; then
+    fail 'signing guard leaked a credential value'
   fi
   pass 'gradle_signing'
 }
@@ -3140,6 +3512,24 @@ bootstrap_core() {
   diff -r "$BOOTSTRAP_ROOT/conflict baseline" "$bootstrap_conflict_project" \
     >/dev/null 2>&1 || fail 'skip conflict changed the project'
 
+  bootstrap_skip_apply_project="$BOOTSTRAP_ROOT/skip apply project"
+  inspection_make_minimal_kotlin "$bootstrap_skip_apply_project"
+  mkdir -p "$bootstrap_skip_apply_project/.github/workflows"
+  printf 'name: preserved user workflow\n' > \
+    "$bootstrap_skip_apply_project/.github/workflows/release-android.yml"
+  cp "$bootstrap_skip_apply_project/.github/workflows/release-android.yml" \
+    "$BOOTSTRAP_ROOT/skip-workflow.expected"
+  bootstrap_core_run 'non-dry skip did not report incomplete setup' 1 \
+    "$BOOTSTRAP" --project "$bootstrap_skip_apply_project" --conflict skip
+  assert_same_file "$BOOTSTRAP_ROOT/skip-workflow.expected" \
+    "$bootstrap_skip_apply_project/.github/workflows/release-android.yml" \
+    'non-dry skip changed the conflicting workflow'
+  grep -F 'BEGIN flutter-play-store-release schema=1' \
+    "$bootstrap_skip_apply_project/android/app/build.gradle.kts" >/dev/null 2>&1 ||
+    fail 'non-dry skip did not apply the safe Gradle candidate'
+  [ -f "$bootstrap_skip_apply_project/android/Gemfile" ] ||
+    fail 'non-dry skip did not create a safe planned target'
+
   bootstrap_core_run 'missing bootstrap arguments were accepted' 2 "$BOOTSTRAP"
   bootstrap_core_run 'invalid conflict mode was accepted' 2 \
     "$BOOTSTRAP" --project "$bootstrap_dry_project" --conflict overwrite
@@ -3167,6 +3557,37 @@ bootstrap_core() {
     "$BOOTSTRAP" --project "$bootstrap_apply_project"
   diff -r "$BOOTSTRAP_ROOT/apply baseline" "$bootstrap_apply_project" \
     >/dev/null 2>&1 || fail 'second bootstrap apply changed the project'
+
+  bootstrap_merge_project="$BOOTSTRAP_ROOT/merge ownership project"
+  inspection_make_minimal_kotlin "$bootstrap_merge_project"
+  mkdir -p "$bootstrap_merge_project/android/fastlane"
+  printf 'source "https://example.invalid"\n' > "$bootstrap_merge_project/android/Gemfile"
+  printf 'platform :android do\nend\n' > "$bootstrap_merge_project/android/fastlane/Fastfile"
+  printf '# user plugin declarations\n' > "$bootstrap_merge_project/android/fastlane/Pluginfile"
+  bootstrap_core_run 'first merge bootstrap failed' 0 \
+    "$BOOTSTRAP" --project "$bootstrap_merge_project"
+  for bootstrap_merge_path in \
+    android/Gemfile android/fastlane/Fastfile android/fastlane/Pluginfile
+  do
+    bootstrap_marker_count=$(grep -c '^# BEGIN flutter-play-store-release schema=1$' \
+      "$bootstrap_merge_project/$bootstrap_merge_path")
+    [ "$bootstrap_marker_count" -eq 1 ] ||
+      fail "first merge did not create one owned block: $bootstrap_merge_path"
+  done
+  cp -R "$bootstrap_merge_project" "$BOOTSTRAP_ROOT/merge ownership baseline"
+  bootstrap_core_run 'second merge bootstrap failed' 0 \
+    "$BOOTSTRAP" --project "$bootstrap_merge_project"
+  diff -r "$BOOTSTRAP_ROOT/merge ownership baseline" "$bootstrap_merge_project" \
+    >/dev/null 2>&1 || fail 'second merge bootstrap appended or changed an owned block'
+
+  bootstrap_bad_marker_project="$BOOTSTRAP_ROOT/malformed merge marker project"
+  inspection_make_minimal_kotlin "$bootstrap_bad_marker_project"
+  printf '# BEGIN flutter-play-store-release schema=1\n' > \
+    "$bootstrap_bad_marker_project/android/Gemfile"
+  bootstrap_core_run 'malformed merge marker was accepted' 2 \
+    "$BOOTSTRAP" --project "$bootstrap_bad_marker_project" --dry-run
+  grep -F 'PLAN fail-conflict android/Gemfile' "$BOOTSTRAP_LAST_STDOUT" \
+    >/dev/null 2>&1 || fail 'malformed merge marker was not planned as a conflict'
 
   for bootstrap_fail_after in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
   do

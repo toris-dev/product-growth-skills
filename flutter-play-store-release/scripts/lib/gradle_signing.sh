@@ -7,6 +7,101 @@ fprs_gradle_signing_error() {
   printf 'ERROR: Gradle signing planner: %s\n' "$*" >&2
 }
 
+fprs_gradle_signing_task_requires_credentials() {
+  [ "$#" -gt 0 ] || return 1
+  local fprs_gradle_requested fprs_gradle_direct
+  for fprs_gradle_requested in "$@"
+  do
+    fprs_gradle_direct=${fprs_gradle_requested##*:}
+    fprs_gradle_direct=$(printf '%s' "$fprs_gradle_direct" |
+      tr '[:upper:]' '[:lower:]') || return 1
+    case "$fprs_gradle_direct" in
+      assemble*release|bundle*release|publish*release*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+fprs_gradle_signing_properties_path() {
+  [ "$#" -eq 1 ] && [ -n "$1" ] || return 2
+  if [ "${ANDROID_KEY_PROPERTIES_PATH+x}" = x ]; then
+    printf '%s\n' "$ANDROID_KEY_PROPERTIES_PATH"
+  else
+    printf '%s/key.properties\n' "${1%/}"
+  fi
+}
+
+fprs_gradle_signing_property_value() {
+  [ "$#" -eq 2 ] || return 1
+  awk -v target="$2" '
+    /^[[:space:]]*[#!]/ { next }
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      separator = index(line, "=")
+      if (!separator) next
+      key = substr(line, 1, separator - 1)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+      if (key != target) next
+      count++
+      value = substr(line, separator + 1)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      selected = value
+    }
+    END {
+      if (count != 1 || selected == "") exit 1
+      print selected
+    }
+  ' "$1"
+}
+
+fprs_gradle_signing_guard_check() {
+  [ "$#" -eq 3 ] || return 2
+  local fprs_gradle_task fprs_gradle_properties fprs_gradle_app_dir
+  local fprs_gradle_store_file fprs_gradle_store_password
+  local fprs_gradle_key_alias fprs_gradle_key_password fprs_gradle_keystore
+  fprs_gradle_task=$1
+  fprs_gradle_properties=$2
+  fprs_gradle_app_dir=$3
+  fprs_gradle_signing_task_requires_credentials "$fprs_gradle_task" || return 0
+  if [ ! -f "$fprs_gradle_properties" ] || [ -L "$fprs_gradle_properties" ]; then
+    printf 'ERROR: Android release signing properties file is missing\n' >&2
+    return 1
+  fi
+  fprs_gradle_store_file=$(fprs_gradle_signing_property_value \
+    "$fprs_gradle_properties" storeFile) || {
+    printf 'ERROR: Android release signing properties are incomplete\n' >&2
+    return 1
+  }
+  fprs_gradle_store_password=$(fprs_gradle_signing_property_value \
+    "$fprs_gradle_properties" storePassword) || {
+    printf 'ERROR: Android release signing properties are incomplete\n' >&2
+    return 1
+  }
+  fprs_gradle_key_alias=$(fprs_gradle_signing_property_value \
+    "$fprs_gradle_properties" keyAlias) || {
+    printf 'ERROR: Android release signing properties are incomplete\n' >&2
+    return 1
+  }
+  fprs_gradle_key_password=$(fprs_gradle_signing_property_value \
+    "$fprs_gradle_properties" keyPassword) || {
+    printf 'ERROR: Android release signing properties are incomplete\n' >&2
+    return 1
+  }
+  # Keep all secret values in local variables and never interpolate them into output.
+  [ -n "$fprs_gradle_store_password" ] && [ -n "$fprs_gradle_key_alias" ] &&
+    [ -n "$fprs_gradle_key_password" ] || return 1
+  case "$fprs_gradle_store_file" in
+    /*) fprs_gradle_keystore=$fprs_gradle_store_file ;;
+    *) fprs_gradle_keystore="${fprs_gradle_app_dir%/}/$fprs_gradle_store_file" ;;
+  esac
+  if [ ! -f "$fprs_gradle_keystore" ]; then
+    printf 'ERROR: Android release keystore file is missing\n' >&2
+    return 1
+  fi
+  return 0
+}
+
 fprs_gradle_signing_file_mode() {
   [ "$#" -eq 1 ] && [ -e "$1" ] || return 1
   local fprs_gradle_mode
@@ -131,10 +226,58 @@ KOTLIN
 }
 
 fprs_gradle_signing_validate_markers() {
-  [ "$#" -eq 1 ] || return 1
-  awk '
+  [ "$#" -eq 2 ] || return 1
+  awk -v report="$2" '
+    function visible_text(raw,    output, i, character, next_character, sequence) {
+      output = ""
+      for (i = 1; i <= length(raw); i++) {
+        character = substr(raw, i, 1)
+        next_character = substr(raw, i + 1, 1)
+        sequence = substr(raw, i, 3)
+        if (triple_quote != "") {
+          if (sequence == triple_quote) {
+            triple_quote = ""
+            i += 2
+          }
+          continue
+        }
+        if (block_comment) {
+          if (character == "*" && next_character == "/") {
+            block_comment = 0
+            i++
+          }
+          continue
+        }
+        if (quote != "") {
+          if (escaped) escaped = 0
+          else if (character == "\\") escaped = 1
+          else if (character == quote) quote = ""
+          continue
+        }
+        if (sequence == "\"\"\"" || sequence == "\047\047\047") {
+          triple_quote = sequence
+          i += 2
+          continue
+        }
+        if (character == "/" && next_character == "*") {
+          block_comment = 1
+          i++
+          continue
+        }
+        if (character == "\"" || character == "\047") {
+          quote = character
+          continue
+        }
+        if (character == "/" && next_character == "/") {
+          output = output substr(raw, i)
+          break
+        }
+        output = output character
+      }
+      return output
+    }
     {
-      line = $0
+      line = visible_text($0)
       sub(/\r$/, "", line)
       if (line ~ /BEGIN flutter-play-store-release/) any_begin++
       if (line ~ /END flutter-play-store-release/) any_end++
@@ -148,6 +291,8 @@ fprs_gradle_signing_validate_markers() {
       }
     }
     END {
+      print begin_line > report
+      print end_line >> report
       if (any_begin == 0 && any_end == 0) exit 0
       if (any_begin != 1 || any_end != 1 || exact_begin != 1 || exact_end != 1 || begin_line >= end_line) exit 2
       exit 10
@@ -156,33 +301,27 @@ fprs_gradle_signing_validate_markers() {
 }
 
 fprs_gradle_signing_strip_owned_block() {
-  [ "$#" -eq 2 ] || return 1
-  awk '
-    {
-      line = $0
-      sub(/\r$/, "", line)
-      if (line ~ /^[[:space:]]*\/\/ BEGIN flutter-play-store-release schema=1[[:space:]]*$/) {
-        inside = 1
-        next
-      }
-      if (inside && line ~ /^[[:space:]]*\/\/ END flutter-play-store-release[[:space:]]*$/) {
-        inside = 0
-        next
-      }
-      if (!inside) print
-    }
-    END { if (inside) exit 1 }
-  ' "$1" > "$2"
+  [ "$#" -eq 4 ] || return 1
+  awk -v begin="$3" -v end="$4" 'NR < begin || NR > end { print }' \
+    "$1" > "$2"
 }
 
 fprs_gradle_signing_scan() {
   [ "$#" -eq 3 ] || return 1
   awk -v dsl="$1" '
-    function uncomment(raw,    output, i, character, next_character) {
+    function uncomment(raw,    output, i, character, next_character, sequence) {
       output = ""
       for (i = 1; i <= length(raw); i++) {
         character = substr(raw, i, 1)
         next_character = substr(raw, i + 1, 1)
+        sequence = substr(raw, i, 3)
+        if (triple_quote != "") {
+          if (sequence == triple_quote) {
+            triple_quote = ""
+            i += 2
+          }
+          continue
+        }
         if (block_comment) {
           if (character == "*" && next_character == "/") {
             block_comment = 0
@@ -195,6 +334,11 @@ fprs_gradle_signing_scan() {
           if (escaped) escaped = 0
           else if (character == "\\") escaped = 1
           else if (character == quote) quote = ""
+          continue
+        }
+        if (sequence == "\"\"\"" || sequence == "\047\047\047") {
+          triple_quote = sequence
+          i += 2
           continue
         }
         if (character == "/" && next_character == "*") {
@@ -321,7 +465,7 @@ fprs_gradle_signing_scan() {
       }
     }
     END {
-      if (depth != 0 || block_comment || quote != "") malformed = 1
+      if (depth != 0 || block_comment || quote != "" || triple_quote != "") malformed = 1
       print "android_count=" android_count
       print "android_open=" android_open
       print "android_close=" android_close
@@ -375,6 +519,10 @@ fprs_gradle_signing_candidate() {
   }
   fprs_gradle_output_parent=$(CDPATH= cd -- "$fprs_gradle_output_parent" && pwd -P) || return 1
   fprs_gradle_output_absolute="$fprs_gradle_output_parent/${3##*/}"
+  if [ -e "$fprs_gradle_output_absolute" ] || [ -L "$fprs_gradle_output_absolute" ]; then
+    fprs_gradle_signing_error 'candidate output must be a new, unaliased path'
+    return 2
+  fi
   fprs_gradle_source_parent=${2%/*}
   [ "$fprs_gradle_source_parent" != "$2" ] || fprs_gradle_source_parent=.
   fprs_gradle_source_parent=$(CDPATH= cd -- "$fprs_gradle_source_parent" && pwd -P) || return 1
@@ -386,7 +534,8 @@ fprs_gradle_signing_candidate() {
 
   local fprs_gradle_stage fprs_gradle_marker_status fprs_gradle_owned
   local fprs_gradle_clean fprs_gradle_block fprs_gradle_report
-  local fprs_gradle_original_report fprs_gradle_marker_begin fprs_gradle_marker_end
+  local fprs_gradle_original_report fprs_gradle_marker_report
+  local fprs_gradle_marker_begin fprs_gradle_marker_end
   local fprs_gradle_original_android_count fprs_gradle_original_android_open
   local fprs_gradle_original_android_close fprs_gradle_original_malformed
   local fprs_gradle_mode fprs_gradle_android_count fprs_gradle_android_close
@@ -404,8 +553,9 @@ fprs_gradle_signing_candidate() {
   fprs_gradle_block="$fprs_gradle_stage/block"
   fprs_gradle_report="$fprs_gradle_stage/report"
   fprs_gradle_original_report="$fprs_gradle_stage/original-report"
+  fprs_gradle_marker_report="$fprs_gradle_stage/markers"
   fprs_gradle_owned=0
-  if fprs_gradle_signing_validate_markers "$2"; then
+  if fprs_gradle_signing_validate_markers "$2" "$fprs_gradle_marker_report"; then
     fprs_gradle_marker_status=0
   else
     fprs_gradle_marker_status=$?
@@ -421,14 +571,8 @@ fprs_gradle_signing_candidate() {
         rm -rf -- "$fprs_gradle_stage"
         return 1
       }
-      fprs_gradle_marker_begin=$(awk '
-        { line = $0; sub(/\r$/, "", line) }
-        line ~ /^[[:space:]]*\/\/ BEGIN flutter-play-store-release schema=1[[:space:]]*$/ { print NR }
-      ' "$2")
-      fprs_gradle_marker_end=$(awk '
-        { line = $0; sub(/\r$/, "", line) }
-        line ~ /^[[:space:]]*\/\/ END flutter-play-store-release[[:space:]]*$/ { print NR }
-      ' "$2")
+      fprs_gradle_marker_begin=$(sed -n '1p' "$fprs_gradle_marker_report")
+      fprs_gradle_marker_end=$(sed -n '2p' "$fprs_gradle_marker_report")
       fprs_gradle_original_android_count=$(fprs_gradle_signing_report_value \
         android_count "$fprs_gradle_original_report")
       fprs_gradle_original_android_open=$(fprs_gradle_signing_report_value \
@@ -449,7 +593,8 @@ fprs_gradle_signing_candidate() {
         rm -rf -- "$fprs_gradle_stage"
         return 2
       fi
-      fprs_gradle_signing_strip_owned_block "$2" "$fprs_gradle_clean" || {
+      fprs_gradle_signing_strip_owned_block "$2" "$fprs_gradle_clean" \
+        "$fprs_gradle_marker_begin" "$fprs_gradle_marker_end" || {
         rm -rf -- "$fprs_gradle_stage"
         return 1
       }
@@ -496,6 +641,7 @@ fprs_gradle_signing_candidate() {
     return 2
   fi
   if [ "${fprs_gradle_invalid_count:-0}" -ne 0 ] ||
+    [ "${fprs_gradle_release_scopes:-0}" -gt 1 ] ||
     [ "${fprs_gradle_assignments:-0}" -gt 1 ] ||
     { [ "${fprs_gradle_debug_count:-0}" -gt 0 ] &&
       [ "${fprs_gradle_custom_count:-0}" -gt 0 ]; }

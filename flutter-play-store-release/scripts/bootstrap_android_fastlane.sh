@@ -91,6 +91,94 @@ fprs_bootstrap_gitignore() {
   chmod "$bootstrap_ignore_mode" "$2" 2>/dev/null
 }
 
+fprs_bootstrap_mergeable() {
+  local bootstrap_merge_target bootstrap_merge_template bootstrap_merge_output
+  local bootstrap_merge_report bootstrap_merge_status bootstrap_merge_begin
+  local bootstrap_merge_end bootstrap_merge_mode bootstrap_merge_crlf
+  bootstrap_merge_target=$1
+  bootstrap_merge_template=$2
+  bootstrap_merge_output=$3
+  bootstrap_merge_report="$bootstrap_stage/merge-markers.$bootstrap_index"
+  awk -v report="$bootstrap_merge_report" '
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      if (line ~ /BEGIN flutter-play-store-release/) any_begin++
+      if (line ~ /END flutter-play-store-release/) any_end++
+      if (line == "# BEGIN flutter-play-store-release schema=1") {
+        exact_begin++
+        begin_line = NR
+      }
+      if (line == "# END flutter-play-store-release") {
+        exact_end++
+        end_line = NR
+      }
+    }
+    END {
+      print begin_line > report
+      print end_line >> report
+      if (any_begin == 0 && any_end == 0) exit 0
+      if (any_begin == 1 && any_end == 1 && exact_begin == 1 && exact_end == 1 && begin_line < end_line) exit 10
+      exit 2
+    }
+  ' "$bootstrap_merge_target"
+  bootstrap_merge_status=$?
+  case "$bootstrap_merge_status" in
+    0) ;;
+    10)
+      bootstrap_merge_begin=$(sed -n '1p' "$bootstrap_merge_report")
+      bootstrap_merge_end=$(sed -n '2p' "$bootstrap_merge_report")
+      ;;
+    *) return 2 ;;
+  esac
+  if awk '
+    NR == 1 { seen = 1 }
+    substr($0, length($0), 1) != "\r" { non_crlf = 1 }
+    END { exit(seen && !non_crlf ? 0 : 1) }
+  ' "$bootstrap_merge_target"
+  then
+    bootstrap_merge_crlf=1
+  else
+    bootstrap_merge_crlf=0
+  fi
+  if [ "$bootstrap_merge_status" -eq 0 ]; then
+    cp "$bootstrap_merge_target" "$bootstrap_merge_output" 2>/dev/null || return 1
+    if [ "$bootstrap_merge_crlf" -eq 1 ]; then
+      printf '\r\n' >> "$bootstrap_merge_output" || return 1
+      printf '# BEGIN flutter-play-store-release schema=1\r\n' >> "$bootstrap_merge_output"
+      awk '{ sub(/\r$/, ""); printf "%s\r\n", $0 }' "$bootstrap_merge_template" \
+        >> "$bootstrap_merge_output" || return 1
+      printf '# END flutter-play-store-release\r\n' >> "$bootstrap_merge_output"
+    else
+      printf '\n' >> "$bootstrap_merge_output" || return 1
+      printf '# BEGIN flutter-play-store-release schema=1\n' >> "$bootstrap_merge_output"
+      cat "$bootstrap_merge_template" >> "$bootstrap_merge_output" || return 1
+      printf '# END flutter-play-store-release\n' >> "$bootstrap_merge_output"
+    fi
+  else
+    awk -v begin="$bootstrap_merge_begin" -v end="$bootstrap_merge_end" \
+      -v template="$bootstrap_merge_template" -v crlf="$bootstrap_merge_crlf" '
+      NR == begin {
+        if (crlf) printf "# BEGIN flutter-play-store-release schema=1\r\n"
+        else print "# BEGIN flutter-play-store-release schema=1"
+        while ((getline replacement < template) > 0) {
+          sub(/\r$/, "", replacement)
+          if (crlf) printf "%s\r\n", replacement
+          else print replacement
+        }
+        close(template)
+        if (crlf) printf "# END flutter-play-store-release\r\n"
+        else print "# END flutter-play-store-release"
+        next
+      }
+      NR > begin && NR <= end { next }
+      { print }
+    ' "$bootstrap_merge_target" > "$bootstrap_merge_output" || return 1
+  fi
+  bootstrap_merge_mode=$(fprs_file_mode "$bootstrap_merge_target") || return 1
+  chmod "$bootstrap_merge_mode" "$bootstrap_merge_output" 2>/dev/null
+}
+
 fprs_bootstrap_candidate() {
   local bootstrap_relative bootstrap_target bootstrap_output bootstrap_source
   local bootstrap_candidate_mode
@@ -117,12 +205,8 @@ fprs_bootstrap_candidate() {
       *) false ;;
     esac && ! cmp -s "$bootstrap_source" "$bootstrap_target"
   then
-    cp "$bootstrap_target" "$bootstrap_output" 2>/dev/null || return 1
-    printf '\n# BEGIN flutter-play-store-release schema=1\n' >> "$bootstrap_output" || return 1
-    cat "$bootstrap_source" >> "$bootstrap_output" || return 1
-    printf '# END flutter-play-store-release\n' >> "$bootstrap_output" || return 1
-    bootstrap_candidate_mode=$(fprs_file_mode "$bootstrap_target") || return 1
-    chmod "$bootstrap_candidate_mode" "$bootstrap_output" 2>/dev/null
+    fprs_bootstrap_mergeable "$bootstrap_target" "$bootstrap_source" \
+      "$bootstrap_output"
   else
     fprs_bootstrap_copy "$bootstrap_source" "$bootstrap_output"
   fi
@@ -245,21 +329,36 @@ do
         bootstrap_classification=fail-conflict
     else
       fprs_bootstrap_candidate "$bootstrap_relative" "$bootstrap_target" \
-        "$bootstrap_candidate" || exit 1
-      if cmp -s "$bootstrap_candidate" "$bootstrap_target"; then
-        bootstrap_classification=preserve
-      else
-        case "$bootstrap_relative" in
-          .gitignore|android/Gemfile|android/fastlane/Fastfile|android/fastlane/Pluginfile)
-            bootstrap_classification=merge ;;
-          *)
-            bootstrap_candidate=
-            bootstrap_conflicts=$((bootstrap_conflicts + 1))
-            [ "$conflict_mode" = skip ] && bootstrap_classification=skip-conflict ||
-              bootstrap_classification=fail-conflict
-            ;;
-        esac
-      fi
+        "$bootstrap_candidate"
+      candidate_status=$?
+      case "$candidate_status" in
+        0)
+          if cmp -s "$bootstrap_candidate" "$bootstrap_target"; then
+            bootstrap_classification=preserve
+          else
+            case "$bootstrap_relative" in
+              .gitignore|android/Gemfile|android/fastlane/Fastfile|android/fastlane/Pluginfile)
+                bootstrap_classification=merge ;;
+              *)
+                bootstrap_candidate=
+                bootstrap_conflicts=$((bootstrap_conflicts + 1))
+                [ "$conflict_mode" = skip ] && bootstrap_classification=skip-conflict ||
+                  bootstrap_classification=fail-conflict
+                ;;
+            esac
+          fi
+          ;;
+        2)
+          bootstrap_candidate=
+          bootstrap_conflicts=$((bootstrap_conflicts + 1))
+          [ "$conflict_mode" = skip ] && bootstrap_classification=skip-conflict ||
+            bootstrap_classification=fail-conflict
+          ;;
+        *)
+          printf 'ERROR: bootstrap candidate generation failed operationally\n' >&2
+          exit 1
+          ;;
+      esac
     fi
   else
     fprs_bootstrap_candidate "$bootstrap_relative" "$bootstrap_target" \
@@ -276,12 +375,14 @@ do
 done < "$bootstrap_stage/plan"
 
 if [ "$bootstrap_conflicts" -gt 0 ]; then
-  if [ "$conflict_mode" = skip ]; then
+  if [ "$conflict_mode" = fail ]; then
+    printf 'ERROR: bootstrap refused conflicting paths\n' >&2
+    exit 2
+  fi
+  if [ "$dry_run" -eq 1 ]; then
     printf 'ERROR: bootstrap incomplete; conflicts were skipped\n' >&2
     exit 1
   fi
-  printf 'ERROR: bootstrap refused conflicting paths\n' >&2
-  exit 2
 fi
 [ "$dry_run" -eq 0 ] || exit 0
 
@@ -305,4 +406,10 @@ fprs_project_transaction_validate fprs_bootstrap_validate_candidate || {
   exit "$bootstrap_status"
 }
 fprs_project_transaction_commit
-exit $?
+bootstrap_status=$?
+[ "$bootstrap_status" -eq 0 ] || exit "$bootstrap_status"
+if [ "$bootstrap_conflicts" -gt 0 ]; then
+  printf 'ERROR: bootstrap incomplete; conflicts were skipped\n' >&2
+  exit 1
+fi
+exit 0

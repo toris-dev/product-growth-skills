@@ -130,6 +130,34 @@ class FlutterPlayStoreReleaseHelperTest < Minitest::Test
     )
   end
 
+  def test_artifact_discovery_supports_flutter_apk_paths_and_exact_variants
+    root = make_project
+    started = Time.now - 2
+    unflavored = artifact(root, "flutter-apk/app-release.apk", "apk")
+    assert_equal File.realpath(unflavored), locate(root, started: started, flavor: nil, type: "APK")
+    FileUtils.rm_f(unflavored)
+
+    flavored = artifact(root, "flutter-apk/app-demo-release.apk", "demo apk")
+    assert_equal File.realpath(flavored), locate(root, started: started, flavor: "demo", type: "APK")
+    assert_raises(FPRS::ArtifactError) { locate(root, started: started, flavor: "dem", type: "APK") }
+  end
+
+  def test_artifact_discovery_uses_relative_exact_variant_not_project_name_substrings
+    root = File.join(@tmp, "paid-project")
+    FileUtils.mkdir_p(File.join(root, "build", "app", "outputs"))
+    artifact(root, "bundle/freeRelease/app-free-release.aab", "free")
+    assert_raises(FPRS::ArtifactError) do
+      locate(root, started: Time.now - 2, flavor: "paid", type: "AAB")
+    end
+
+    FileUtils.rm_rf(File.join(root, "build"))
+    FileUtils.mkdir_p(File.join(root, "build", "app", "outputs"))
+    artifact(root, "bundle/paidRelease/app-free-release.aab", "ambiguous")
+    assert_raises(FPRS::ArtifactError) do
+      locate(root, started: Time.now - 2, flavor: "paid", type: "AAB")
+    end
+  end
+
   def test_artifact_discovery_rejects_zero_multiple_stale_empty_prior_and_flavor_mismatch
     root = make_project
     started = Time.now
@@ -330,8 +358,8 @@ class FlutterPlayStoreReleaseCoordinatorTest < Minitest::Test
       @commit_count
     end
 
-    def prepare(run_tests:)
-      record(:prepare, run_tests: run_tests)
+    def prepare(run_tests:, run_analyze:, build_runner:)
+      record(:prepare, run_tests: run_tests, run_analyze: run_analyze, build_runner: build_runner)
       true
     end
 
@@ -354,7 +382,9 @@ class FlutterPlayStoreReleaseCoordinatorTest < Minitest::Test
         kind = artifact_type == "AAB" ? "bundle" : "apk"
         variant = flavor ? "#{flavor}Release" : "release"
         name = flavor ? "app-#{flavor}-release" : "app-release"
-        name = "#{name}-#{index}" if @build_outputs > 1
+        if @build_outputs > 1 && index.positive?
+          name = "app"
+        end
         path = File.join(@project_root, "build", "app", "outputs", kind, variant, "#{name}.#{extension}")
         FileUtils.mkdir_p(File.dirname(path))
         File.binwrite(path, "artifact #{index}")
@@ -366,8 +396,8 @@ class FlutterPlayStoreReleaseCoordinatorTest < Minitest::Test
       @release_id
     end
 
-    def firebase_clients
-      record(:firebase_clients)
+    def firebase_clients(flavor:)
+      record(:firebase_clients, flavor: flavor)
       @firebase_clients_result
     end
 
@@ -417,6 +447,19 @@ class FlutterPlayStoreReleaseCoordinatorTest < Minitest::Test
     File.write(@firebase_json, service_json)
     @keystore = File.join(@tmp, "upload.jks")
     File.binwrite(@keystore, "test key")
+    @ci_signing_root = File.join(@tmp, "ci-signing")
+    Dir.mkdir(@ci_signing_root, 0o700)
+    @ci_keystore = File.join(@ci_signing_root, "workflow-upload.jks")
+    File.binwrite(@ci_keystore, "workflow key")
+    File.chmod(0o600, @ci_keystore)
+    @ci_properties = File.join(@ci_signing_root, "workflow-key.properties")
+    File.write(@ci_properties, <<~PROPERTIES)
+      storeFile=#{@ci_keystore}
+      storePassword=workflow-store
+      keyAlias=workflow-upload
+      keyPassword=workflow-key
+    PROPERTIES
+    File.chmod(0o600, @ci_properties)
     @actions = FakeActions.new(@project)
   end
 
@@ -646,6 +689,96 @@ class FlutterPlayStoreReleaseCoordinatorTest < Minitest::Test
     refute File.exist?(snapshot.fetch(:path))
   end
 
+  def test_ci_accepts_workflow_key_properties_override_without_raw_signing_scalars
+    env = ci_override_env
+    report = FPRS.doctor(
+      env: env, target: "play-store", context: "deploy",
+      actions: @actions, project_root: @project
+    )
+    assert report.any? { |entry| entry[:level] == "PASS" && entry[:message].include?("signing") }
+
+    result = release(target: "play-store", env: env)
+    assert_equal "SUCCESS", result.fetch("status")
+    assert_equal(
+      { "ANDROID_KEY_PROPERTIES_PATH" => File.realpath(@ci_properties) },
+      build_call.fetch(:environment)
+    )
+    assert File.exist?(@ci_properties), "workflow-owned properties were deleted"
+    assert File.exist?(@ci_keystore), "workflow-owned keystore was deleted"
+    @actions = FakeActions.new(@project)
+    artifact = FPRS.build_only(
+      options: {}, env: env.reject { |key, _| key == "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_PATH" },
+      actions: @actions, project_root: @project
+    )
+    assert artifact.end_with?(".aab")
+    assert_equal File.realpath(@ci_properties), build_call.fetch(:environment).fetch("ANDROID_KEY_PROPERTIES_PATH")
+    assert File.exist?(@ci_properties)
+  end
+
+  def test_ci_override_is_preserved_after_build_failure
+    @actions.build_outputs = 2
+    assert_raises(FPRS::ArtifactError) do
+      release(target: "play-store", env: ci_override_env)
+    end
+    assert File.exist?(@ci_properties)
+    assert File.exist?(@ci_keystore)
+  end
+
+  def test_invalid_explicit_ci_override_fails_without_raw_signing_fallback_or_network
+    invalid_parent = File.join(@tmp, "public-signing")
+    Dir.mkdir(invalid_parent, 0o755)
+    invalid = File.join(invalid_parent, "key.properties")
+    FileUtils.cp(@ci_properties, invalid)
+    File.chmod(0o600, invalid)
+    env = common_env.merge(
+      "CI" => "true",
+      "ANDROID_KEY_PROPERTIES_PATH" => invalid,
+      "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_PATH" => @play_json
+    )
+    assert_raises(FPRS::PreflightError) do
+      release(target: "play-store", env: env)
+    end
+    assert_empty calls(:google_play_track_version_codes)
+    assert_empty calls(:flutter_build)
+    refute @actions.logs.any? { |_level, message| message.include?(invalid) }
+  end
+
+  def test_ci_override_rejects_symlink_wrong_mode_relative_store_file_and_workspace_properties
+    cases = []
+    symlink = File.join(@ci_signing_root, "linked.properties")
+    File.symlink(@ci_properties, symlink)
+    cases << symlink
+
+    wrong_mode = File.join(@ci_signing_root, "wrong-mode.properties")
+    FileUtils.cp(@ci_properties, wrong_mode)
+    File.chmod(0o640, wrong_mode)
+    cases << wrong_mode
+
+    relative = File.join(@ci_signing_root, "relative.properties")
+    File.write(relative, "storeFile=workflow-upload.jks\nstorePassword=x\nkeyAlias=x\nkeyPassword=x\n")
+    File.chmod(0o600, relative)
+    cases << relative
+
+    cases.each do |path|
+      @actions = FakeActions.new(@project)
+      assert_raises(FPRS::PreflightError) do
+        FPRS.doctor(
+          env: ci_override_env.merge("ANDROID_KEY_PROPERTIES_PATH" => path),
+          target: "play-store", context: "deploy", actions: @actions, project_root: @project
+        )
+      end
+    end
+
+    File.write(File.join(@project, "android", "key.properties"), "user workspace file")
+    @actions = FakeActions.new(@project)
+    assert_raises(FPRS::PreflightError) do
+      FPRS.doctor(
+        env: ci_override_env, target: "play-store", context: "deploy",
+        actions: @actions, project_root: @project
+      )
+    end
+  end
+
   def test_invalid_service_account_json_stops_before_any_network_action
     invalid = File.join(@tmp, "invalid-service.json")
     File.write(invalid, JSON.generate(type: "authorized_user", client_email: "wrong@example.test"))
@@ -796,6 +929,33 @@ class FlutterPlayStoreReleaseCoordinatorTest < Minitest::Test
     assert_equal [unrelated], Dir.glob(File.join(@project, "build", "app", "outputs", "**", "*.aab"))
   end
 
+  def test_successful_flavored_and_unflavored_builds_preserve_unrelated_predecessors
+    free = File.join(@project, "build", "app", "outputs", "bundle", "freeRelease", "app-free-release.aab")
+    paid = File.join(@project, "build", "app", "outputs", "bundle", "paidRelease", "app-paid-release.aab")
+    FileUtils.mkdir_p(File.dirname(free))
+    FileUtils.mkdir_p(File.dirname(paid))
+    File.binwrite(free, "free predecessor")
+    File.binwrite(paid, "paid predecessor")
+    release(
+      target: "play-store",
+      env: common_env.merge(
+        "FLUTTER_FLAVOR" => "paid",
+        "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_PATH" => @play_json)
+    )
+    assert_equal "free predecessor", File.binread(free)
+    assert_equal "artifact 0", File.binread(paid)
+
+    @actions = FakeActions.new(@project)
+    release(
+      target: "play-store",
+      env: common_env.merge("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_PATH" => @play_json)
+    )
+    assert_equal "free predecessor", File.binread(free)
+    assert_equal "artifact 0", File.binread(paid)
+    unflavored = File.join(@project, "build", "app", "outputs", "bundle", "release", "app-release.aab")
+    assert_equal "artifact 0", File.binread(unflavored)
+  end
+
   def test_failed_build_cleans_base64_keystore_and_private_properties
     @actions.build_outputs = 2
     assert_raises(FPRS::ArtifactError) do
@@ -847,6 +1007,90 @@ class FlutterPlayStoreReleaseCoordinatorTest < Minitest::Test
     assert_equal "play-store", result.fetch("failed_destination")
     assert_empty result.fetch("successful_destinations")
     refute_includes File.read(result_path), @play_json
+  end
+
+  def test_every_early_release_failure_writes_one_redacted_failure_result_and_rethrows
+    cases = [
+      ["invalid-target", common_env, FPRS::ConfigurationError],
+      ["play-store", common_env.merge(
+        "PLAY_STORE_TRACK" => "production",
+        "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_PATH" => @play_json), FPRS::ConfigurationError],
+      ["firebase", common_env.merge(firebase_env.reject { |key, _| key == "CONFIRM_FIREBASE_AAB_PLAY_LINKED" }),
+        FPRS::ConfigurationError],
+      ["play-store", common_env, FPRS::PreflightError]
+    ]
+
+    cases.each_with_index do |(target, base_env, error_class), index|
+      @actions = FakeActions.new(@project)
+      result_path = File.join(@tmp, "early-failure-#{index}.json")
+      error = assert_raises(error_class) do
+        release(target: target, env: base_env.merge("RELEASE_RESULT_PATH" => result_path))
+      end
+      result = JSON.parse(File.read(result_path))
+      assert_equal "FAILURE", result.fetch("status")
+      assert_equal 1, result.fetch("schema_version")
+      refute_includes File.read(result_path), @play_json
+      assert_equal 1, @actions.logs.count { |_level, message| message == "status=FAILURE" }
+      refute error.message.empty?
+    end
+
+    @actions = FakeActions.new(@project)
+    @actions.release_id = "com.wrong.app"
+    result_path = File.join(@tmp, "package-mismatch-result.json")
+    assert_raises(FPRS::ConfigurationError) do
+      release(
+        target: "play-store",
+        env: common_env.merge(
+          "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_PATH" => @play_json,
+          "RELEASE_RESULT_PATH" => result_path)
+      )
+    end
+    assert_equal "FAILURE", JSON.parse(File.read(result_path)).fetch("status")
+    assert_equal 1, @actions.logs.count { |_level, message| message == "status=FAILURE" }
+  end
+
+  def test_early_failure_result_or_notification_errors_do_not_replace_original_error
+    blocked_parent = File.join(@tmp, "result-parent-file")
+    File.write(blocked_parent, "not a directory")
+    @actions.notify_failure = RuntimeError.new("notification failed")
+    error = assert_raises(FPRS::ConfigurationError) do
+      release(
+        target: "invalid-target",
+        env: common_env.merge(
+          "RELEASE_RESULT_PATH" => File.join(blocked_parent, "result.json"),
+          "SLACK_WEBHOOK_URL" => "https://hooks.example.invalid/private",
+          "SLACK_NOTIFY_FAILURE" => "true")
+      )
+    end
+    assert_match(/DISTRIBUTION_TARGET/, error.message)
+    assert_equal 1, calls(:notify_slack).length
+  end
+
+  def test_prepare_defaults_and_validated_overrides_are_forwarded_consistently
+    FPRS.prepare_only(env: {}, actions: @actions)
+    assert_equal(
+      { run_tests: false, run_analyze: true, build_runner: "auto" },
+      calls(:prepare).last
+    )
+
+    @actions = FakeActions.new(@project)
+    FPRS.prepare_only(
+      env: {
+        "RUN_FLUTTER_TESTS" => "true",
+        "RUN_FLUTTER_ANALYZE" => "false",
+        "RUN_BUILD_RUNNER" => "true"
+      }, actions: @actions
+    )
+    assert_equal(
+      { run_tests: true, run_analyze: false, build_runner: "true" },
+      calls(:prepare).last
+    )
+
+    @actions = FakeActions.new(@project)
+    assert_raises(FPRS::ConfigurationError) do
+      FPRS.prepare_only(env: { "RUN_BUILD_RUNNER" => "sometimes" }, actions: @actions)
+    end
+    assert_empty calls(:prepare)
   end
 
   def test_slack_failure_never_replaces_a_successful_release_result
@@ -923,6 +1167,14 @@ class FlutterPlayStoreReleaseCoordinatorTest < Minitest::Test
       "ANDROID_KEY_ALIAS" => " upload",
       "ANDROID_KEY_PASSWORD" => "key:pass"
     }
+  end
+
+  def ci_override_env
+    common_env.reject { |key, _| signing_env.key?(key) }.merge(
+      "CI" => "true",
+      "ANDROID_KEY_PROPERTIES_PATH" => @ci_properties,
+      "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_PATH" => @play_json
+    )
   end
 
   def common_env
@@ -1029,16 +1281,44 @@ class FlutterPlayStoreReleaseFastfileTest < Minitest::Test
     refute File.exist?(observed_config), "temporary curl config leaked"
   end
 
-  def test_fastlane_adapter_prepare_runs_build_runner_analyze_and_optional_tests
+  def test_fastlane_adapter_prepare_modes_use_dart_and_dependency_sections_only
     Dir.mktmpdir("fprs-adapter-") do |root|
       File.write(File.join(root, "pubspec.yaml"), "name: app\ndev_dependencies:\n  build_runner: ^2.4.0\n")
       dsl = AdapterDsl.new
-      FPRS::FastlaneAdapter.new(dsl, project_root: root).prepare(run_tests: true)
+      adapter = FPRS::FastlaneAdapter.new(dsl, project_root: root)
+      adapter.prepare(run_tests: false, run_analyze: true, build_runner: "auto")
       commands = dsl.calls.select { |entry| entry.first == :sh }.map { |entry| entry[1] }
       assert_includes commands, %w[flutter pub get]
-      assert_includes commands, %w[flutter pub run build_runner build --delete-conflicting-outputs]
+      assert_includes commands, %w[dart run build_runner build --delete-conflicting-outputs]
       assert_includes commands, %w[flutter analyze]
+      refute_includes commands, %w[flutter test]
+
+      File.write(File.join(root, "pubspec.yaml"), <<~PUBSPEC)
+        name: app
+        # build_runner: ^2.4.0
+        flutter:
+          build_runner: decoy
+      PUBSPEC
+      dsl = AdapterDsl.new
+      adapter = FPRS::FastlaneAdapter.new(dsl, project_root: root)
+      adapter.prepare(run_tests: true, run_analyze: false, build_runner: "auto")
+      commands = dsl.calls.select { |entry| entry.first == :sh }.map { |entry| entry[1] }
+      refute_includes commands, %w[dart run build_runner build --delete-conflicting-outputs]
+      refute_includes commands, %w[flutter analyze]
       assert_includes commands, %w[flutter test]
+
+      dsl = AdapterDsl.new
+      adapter = FPRS::FastlaneAdapter.new(dsl, project_root: root)
+      adapter.prepare(run_tests: false, run_analyze: false, build_runner: "true")
+      commands = dsl.calls.select { |entry| entry.first == :sh }.map { |entry| entry[1] }
+      assert_includes commands, %w[dart run build_runner build --delete-conflicting-outputs]
+
+      File.write(File.join(root, "pubspec.yaml"), "name: app\ndependencies:\n  build_runner: ^2.4.0\n")
+      dsl = AdapterDsl.new
+      adapter = FPRS::FastlaneAdapter.new(dsl, project_root: root)
+      adapter.prepare(run_tests: false, run_analyze: false, build_runner: "false")
+      commands = dsl.calls.select { |entry| entry.first == :sh }.map { |entry| entry[1] }
+      refute_includes commands, %w[dart run build_runner build --delete-conflicting-outputs]
     end
   end
 
@@ -1069,6 +1349,104 @@ class FlutterPlayStoreReleaseFastfileTest < Minitest::Test
       assert_equal "com.example.app.demo.prod", adapter.release_application_id(flavor: "demo")
     end
   end
+
+  def test_application_id_resolution_ignores_decoys_and_scopes_release_build_type
+    Dir.mktmpdir("fprs-gradle-structural-") do |root|
+      app = File.join(root, "android", "app")
+      FileUtils.mkdir_p(app)
+      File.write(File.join(app, "build.gradle.kts"), <<~GRADLE)
+        android {
+          // defaultConfig { applicationId = "com.decoy.comment" }
+          val decoy = "buildTypes { release { applicationIdSuffix = \\\".wrong\\\" } }"
+          signingConfigs {
+            create("release") { keyAlias = "applicationIdSuffix = .signing" }
+          }
+          defaultConfig { applicationId = "com.example.structural" }
+          productFlavors {
+            create("demo") { applicationIdSuffix = ".demo" }
+          }
+          buildTypes {
+            getByName("release") { applicationIdSuffix = ".prod" }
+          }
+        }
+      GRADLE
+      adapter = FPRS::FastlaneAdapter.new(AdapterDsl.new, project_root: root)
+      assert_equal "com.example.structural.demo.prod", adapter.release_application_id(flavor: "demo")
+    end
+  end
+
+  def test_application_id_resolution_supports_compact_groovy_and_fails_closed_on_dynamic_or_duplicate
+    Dir.mktmpdir("fprs-gradle-groovy-") do |root|
+      app = File.join(root, "android", "app")
+      FileUtils.mkdir_p(app)
+      gradle = File.join(app, "build.gradle")
+      File.write(gradle, "android { defaultConfig { applicationId 'com.example.groovy' }; productFlavors { demo { applicationIdSuffix '.demo' } }; buildTypes { release { applicationIdSuffix '.prod' } } }")
+      adapter = FPRS::FastlaneAdapter.new(AdapterDsl.new, project_root: root)
+      assert_equal "com.example.groovy.demo.prod", adapter.release_application_id(flavor: "demo")
+
+      File.write(gradle, "android { defaultConfig { applicationId = project.dynamicId } }")
+      assert_nil adapter.release_application_id(flavor: nil)
+
+      File.write(gradle, "android { defaultConfig { applicationId 'com.one'; applicationId 'com.two' } }")
+      assert_nil adapter.release_application_id(flavor: nil)
+
+      File.write(gradle, "android { defaultConfig { applicationId 'com.base' }; productFlavors { demo { applicationIdSuffix = project.suffix } } }")
+      assert_nil adapter.release_application_id(flavor: "demo")
+
+      File.write(gradle, "android { defaultConfig { applicationId 'com.base' }; productFlavors { other { applicationIdSuffix '.other' } } }")
+      assert_nil adapter.release_application_id(flavor: "demo")
+    end
+  end
+
+  def test_firebase_clients_use_only_highest_priority_selected_source_set
+    Dir.mktmpdir("fprs-firebase-sources-") do |root|
+      app = File.join(root, "android", "app")
+      FileUtils.mkdir_p(app)
+      write_google_services(File.join(app, "google-services.json"), "com.example.app", "root-app")
+      write_google_services(File.join(app, "src", "demo", "google-services.json"), "com.example.app", "flavor-app")
+      write_google_services(File.join(app, "src", "release", "google-services.json"), "com.wrong.release", "release-wrong")
+      write_google_services(File.join(root, "examples", "google-services.json"), "com.example.app", "unrelated-match")
+
+      adapter = FPRS::FastlaneAdapter.new(AdapterDsl.new, project_root: root)
+      assert_equal [{ package_name: "com.wrong.release", app_id: "release-wrong" }],
+        adapter.firebase_clients(flavor: "demo")
+      assert_raises(FPRS::ConfigurationError) do
+        FPRS.send(:validate_firebase_mapping!, {
+          "APP_PACKAGE_NAME" => "com.example.app", "FIREBASE_APP_ID" => "root-app"
+        }, adapter, flavor: "demo")
+      end
+
+      write_google_services(File.join(app, "src", "demoRelease", "google-services.json"), "com.example.app", "variant-app")
+      assert_equal [{ package_name: "com.example.app", app_id: "variant-app" }],
+        adapter.firebase_clients(flavor: "demo")
+    end
+  end
+
+  def test_java_properties_unicode_decoder_handles_surrogate_pairs_and_rejects_malformed_pairs
+    assert_equal "rocket-🚀", FPRS.send(:java_properties_unescape, "rocket-\\uD83D\\uDE80")
+    %w[\\uD83D \\uDE80 \\uD83D\\u0041 \\uD83Dbroken].each do |raw|
+      error = assert_raises(FPRS::ConfigurationError) do
+        FPRS.send(:java_properties_unescape, raw)
+      end
+      refute_includes error.message, raw
+    end
+  end
+
+  private
+
+  def write_google_services(path, package_name, app_id)
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, JSON.generate(
+      client: [{
+        client_info: {
+          mobilesdk_app_id: app_id,
+          android_client_info: { package_name: package_name }
+        }
+      }]
+    ))
+  end
+
+  public
 
   def test_fastfile_declares_every_public_lane_and_delegates_release_lanes
     source = File.read(File.expand_path("../templates/Fastfile", __dir__))

@@ -121,31 +121,27 @@ module FlutterPlayStoreRelease
     def locate_fresh_artifact(project_root:, build_started_at:, prior_outputs:, flavor:, artifact_type:)
       root = canonical_directory(project_root, "project root")
       type = normalize_artifact_type(artifact_type)
-      pattern = type == "AAB" ? "bundle/**/*.aab" : "apk/**/*.apk"
       output_root = File.join(root, "build", "app", "outputs")
       prior = Array(prior_outputs).map do |path|
         expanded = File.expand_path(path.to_s)
         File.exist?(expanded) ? File.realpath(expanded) : expanded
       end
       started_at = build_started_at.respond_to?(:to_f) ? build_started_at.to_f : Float(build_started_at)
-      selected_flavor = flavor.to_s.strip.downcase
+      selected_flavor = present(flavor)
 
-      candidates = Dir.glob(File.join(output_root, pattern)).select do |path|
-        expanded = File.expand_path(path)
-        next false if prior.include?(expanded)
-        next false unless safe_regular_file?(expanded)
-        next false unless File.size(expanded).positive?
-        next false if File.mtime(expanded).to_f < started_at
-        next true if selected_flavor.empty?
-
-        expanded.downcase.include?(selected_flavor)
+      fresh = artifact_inventory(output_root, type).reject do |entry|
+        prior.include?(File.realpath(entry[:path]))
+      end.select do |entry|
+        File.mtime(entry[:path]).to_f >= started_at
       end
-      candidates.sort!
-      if candidates.length != 1
+      matching = fresh.select do |entry|
+        entry[:state] == :variant && entry[:flavor] == selected_flavor && File.size(entry[:path]).positive?
+      end
+      if fresh.length != 1 || matching.length != 1
         raise ArtifactError,
-          "expected exactly one fresh #{type} artifact for the selected variant; found #{candidates.length}"
+          "expected exactly one fresh #{type} artifact for the selected variant; found #{matching.length}"
       end
-      File.realpath(candidates.first)
+      File.realpath(matching.first[:path])
     rescue Errno::ENOENT, Errno::ENOTDIR, ArgumentError => error
       raise ArtifactError, "could not validate the requested build artifact: #{error.class}"
     end
@@ -279,7 +275,15 @@ module FlutterPlayStoreRelease
       report << doctor_entry("PASS", "APP_PACKAGE_NAME is configured") unless blank?(env["APP_PACKAGE_NAME"])
       report << doctor_entry(deploy ? "FAIL" : "WARN", "APP_PACKAGE_NAME is not configured") if blank?(env["APP_PACKAGE_NAME"])
 
-      signing_ready = signing_inputs_complete?(env) || local_key_properties_complete?(project_root)
+      workspace_signing = File.join(project_root, "android", "key.properties")
+      ci = truthy?(env["CI"]) || truthy?(env["GITHUB_ACTIONS"])
+      signing_ready = if ci && (File.exist?(workspace_signing) || File.symlink?(workspace_signing))
+        false
+      elsif !blank?(env["ANDROID_KEY_PROPERTIES_PATH"])
+        valid_key_properties_override?(env["ANDROID_KEY_PROPERTIES_PATH"])
+      else
+        signing_inputs_complete?(env) || (!ci && local_key_properties_complete?(project_root))
+      end
       report << doctor_entry(signing_ready ? "PASS" : (deploy ? "FAIL" : "WARN"),
         signing_ready ? "Android release signing input is available" : "Android release signing input is incomplete")
 
@@ -309,92 +313,125 @@ module FlutterPlayStoreRelease
     end
 
     def release(options:, env:, actions:, project_root:)
-      options = symbolize_keys(options || {})
-      environment = stringify_keys(env || {})
-      root = canonical_directory(project_root, "project root")
-      explicit_target = options[:distribution_target] || environment["DISTRIBUTION_TARGET"]
-      steps = distribution_steps(
-        target: explicit_target,
-        firebase_enabled: environment["ENABLE_FIREBASE_APP_DISTRIBUTION"]
-      )
-      target = steps == %w[play-store firebase] ? "both" : steps.first
-      artifact_type = release_artifact_type(steps, environment)
-      validate_release_policy!(steps, environment, artifact_type)
-      doctor(env: environment, target: target, context: "deploy", actions: actions, project_root: root)
-
       records = []
-      temp_root = Dir.mktmpdir("flutter-play-store-release-")
-      File.chmod(0o700, temp_root)
-      result = nil
+      temp_root = nil
+      environment = {}
+      normalized_options = {}
+      target = nil
+      artifact_type = nil
+      version_name = nil
+      artifact_path = nil
       successful = []
       failed_destination = nil
-      original_error = nil
+      work_error = nil
 
       begin
-        credentials = prepare_credentials(
-          steps: steps, env: environment, project_root: root,
-          temp_root: temp_root, records: records
-        )
-        signing_environment = prepare_signing(
-          env: environment, project_root: root, temp_root: temp_root,
-          records: records
-        )
+        begin
+          normalized_options = symbolize_keys(options || {})
+          environment = stringify_keys(env || {})
+          explicit_target = normalized_options[:distribution_target] || environment["DISTRIBUTION_TARGET"]
+          target = present(explicit_target)
+          steps = distribution_steps(
+            target: explicit_target,
+            firebase_enabled: environment["ENABLE_FIREBASE_APP_DISTRIBUTION"]
+          )
+          target = steps == %w[play-store firebase] ? "both" : steps.first
+          artifact_type = release_artifact_type(steps, environment)
+          validate_release_policy!(steps, environment, artifact_type)
+          root = canonical_directory(project_root, "project root")
+          doctor(env: environment, target: target, context: "deploy", actions: actions, project_root: root)
 
-        actions.prepare(run_tests: truthy?(environment.fetch("RUN_FLUTTER_TESTS", "true")))
-        pubspec_name, pubspec_code = read_pubspec_version(root)
-        exact_tags = if blank?(options[:version_name]) && blank?(environment["VERSION_NAME"])
-          actions.exact_head_tags
-        else
-          []
-        end
-        version_name = resolve_version_name(
-          option: options[:version_name], env: environment["VERSION_NAME"],
-          exact_head_tags: exact_tags, pubspec: pubspec_name
-        )
+          temp_root = Dir.mktmpdir("flutter-play-store-release-")
+          File.chmod(0o700, temp_root)
+          credentials = prepare_credentials(
+            steps: steps, env: environment, project_root: root,
+            temp_root: temp_root, records: records
+          )
+          signing_environment = prepare_signing(
+            env: environment, project_root: root, temp_root: temp_root,
+            records: records
+          )
 
-        flavor = present(options[:flavor] || environment["FLUTTER_FLAVOR"])
-        target_file = present(options[:target] || environment["RELEASE_DART_TARGET"]) || "lib/main.dart"
-        release_id = actions.release_application_id(flavor: flavor)
-        validate_package_name!(environment.fetch("APP_PACKAGE_NAME"), release_id)
-        validate_firebase_mapping!(environment, actions) if steps.include?("firebase")
-        version_code = if steps.include?("play-store")
-          resolve_play_version_code(steps: steps, env: environment, actions: actions,
-            json_key: credentials.fetch(:play).fetch(:path), package_name: environment.fetch("APP_PACKAGE_NAME"))
-        else
-          resolve_local_version_code(environment, pubspec_code, actions)
-        end
-
-        artifact_path = build_once(
-          project_root: root, artifact_type: artifact_type, version_name: version_name,
-          version_code: version_code, flavor: flavor, target: target_file,
-          environment: signing_environment, actions: actions
-        )
-
-        if steps.include?("play-store")
-          begin
-            upload_play_store(
-              env: environment, actions: actions, credential: credentials.fetch(:play),
-              artifact_path: artifact_path, version_name: version_name
-            )
-            successful << "play-store"
-          rescue StandardError => error
-            failed_destination = "play-store"
-            raise error
+          actions.prepare(**prepare_configuration(environment))
+          pubspec_name, pubspec_code = read_pubspec_version(root)
+          exact_tags = if blank?(normalized_options[:version_name]) && blank?(environment["VERSION_NAME"])
+            actions.exact_head_tags
+          else
+            []
           end
+          version_name = resolve_version_name(
+            option: normalized_options[:version_name], env: environment["VERSION_NAME"],
+            exact_head_tags: exact_tags, pubspec: pubspec_name
+          )
+
+          flavor = present(normalized_options[:flavor] || environment["FLUTTER_FLAVOR"])
+          target_file = present(normalized_options[:target] || environment["RELEASE_DART_TARGET"]) || "lib/main.dart"
+          release_id = actions.release_application_id(flavor: flavor)
+          validate_package_name!(environment.fetch("APP_PACKAGE_NAME"), release_id)
+          validate_firebase_mapping!(environment, actions, flavor: flavor) if steps.include?("firebase")
+          version_code = if steps.include?("play-store")
+            resolve_play_version_code(steps: steps, env: environment, actions: actions,
+              json_key: credentials.fetch(:play).fetch(:path), package_name: environment.fetch("APP_PACKAGE_NAME"))
+          else
+            resolve_local_version_code(environment, pubspec_code, actions)
+          end
+
+          artifact_path = build_once(
+            project_root: root, artifact_type: artifact_type, version_name: version_name,
+            version_code: version_code, flavor: flavor, target: target_file,
+            environment: signing_environment, actions: actions
+          )
+
+          if steps.include?("play-store")
+            begin
+              upload_play_store(
+                env: environment, actions: actions, credential: credentials.fetch(:play),
+                artifact_path: artifact_path, version_name: version_name
+              )
+              successful << "play-store"
+            rescue StandardError => error
+              failed_destination = "play-store"
+              raise error
+            end
+          end
+
+          if steps.include?("firebase")
+            begin
+              upload_firebase(
+                env: environment, actions: actions, credential: credentials.fetch(:firebase),
+                artifact_path: artifact_path, artifact_type: artifact_type,
+                version_name: version_name, version_code: version_code
+              )
+              successful << "firebase"
+            rescue StandardError => error
+              failed_destination = "firebase"
+              raise error
+            end
+          end
+        rescue StandardError => error
+          work_error = error
         end
 
-        if steps.include?("firebase")
-          begin
-            upload_firebase(
-              env: environment, actions: actions, credential: credentials.fetch(:firebase),
-              artifact_path: artifact_path, artifact_type: artifact_type,
-              version_name: version_name, version_code: version_code
-            )
-            successful << "firebase"
-          rescue StandardError => error
-            failed_destination = "firebase"
-            raise error
+        if work_error
+          partial = successful.include?("play-store") && failed_destination == "firebase"
+          status = partial ? "PARTIAL_SUCCESS" : "FAILURE"
+          message = partial ?
+            "Play upload succeeded, but Firebase distribution failed; Play was not rolled back." :
+            "Release failed before all requested destinations completed."
+          result = result_payload(
+            status: status, target: target, version: version_name,
+            track: environment.fetch("PLAY_STORE_TRACK", "internal"),
+            artifact_type: artifact_type, artifact_path: artifact_path,
+            successful: successful, failed_destination: failed_destination,
+            message: message
+          )
+          write_result_if_requested(environment, result, actions, preserve: work_error)
+          log_result(actions, result, preserve: work_error)
+          notify_if_requested(environment, actions, result)
+          if partial
+            raise PartialSuccessError, "PARTIAL_SUCCESS: #{message}"
           end
+          raise work_error
         end
 
         result = result_payload(
@@ -408,29 +445,6 @@ module FlutterPlayStoreRelease
         log_result(actions, result)
         notify_if_requested(environment, actions, result)
         result
-      rescue StandardError => error
-        original_error = error
-        partial = successful.include?("play-store") && failed_destination == "firebase"
-        status = partial ? "PARTIAL_SUCCESS" : "FAILURE"
-        message = partial ?
-          "Play upload succeeded, but Firebase distribution failed; Play was not rolled back." :
-          "Release failed before all requested destinations completed."
-        result ||= result_payload(
-          status: status, target: target,
-          version: defined?(version_name) && version_name ? version_name : nil,
-          track: environment.fetch("PLAY_STORE_TRACK", "internal"),
-          artifact_type: artifact_type,
-          artifact_path: defined?(artifact_path) && artifact_path ? artifact_path : nil,
-          successful: successful, failed_destination: failed_destination,
-          message: message
-        )
-        write_result_if_requested(environment, result, actions, preserve: original_error)
-        log_result(actions, result)
-        notify_if_requested(environment, actions, result)
-        if partial
-          raise PartialSuccessError, "PARTIAL_SUCCESS: #{message}"
-        end
-        raise original_error
       ensure
         cleanup_owned_secrets(records)
         FileUtils.remove_entry_secure(temp_root) if temp_root && File.directory?(temp_root)
@@ -438,7 +452,7 @@ module FlutterPlayStoreRelease
     end
 
     def prepare_only(env:, actions:)
-      actions.prepare(run_tests: truthy?(stringify_keys(env)["RUN_FLUTTER_TESTS"] || "true"))
+      actions.prepare(**prepare_configuration(stringify_keys(env || {})))
     end
 
     def build_only(options:, env:, actions:, project_root:)
@@ -452,7 +466,7 @@ module FlutterPlayStoreRelease
       begin
         signing_environment = prepare_signing(env: environment, project_root: root,
           temp_root: temp_root, records: records)
-        actions.prepare(run_tests: truthy?(environment.fetch("RUN_FLUTTER_TESTS", "true")))
+        actions.prepare(**prepare_configuration(environment))
         pubspec_name, pubspec_code = read_pubspec_version(root)
         exact_tags = if blank?(options[:version_name]) && blank?(environment["VERSION_NAME"])
           actions.exact_head_tags
@@ -579,6 +593,69 @@ module FlutterPlayStoreRelease
       type
     end
 
+    def artifact_inventory(output_root, type)
+      patterns = if type == "AAB"
+        [File.join(output_root, "bundle", "**", "*.aab")]
+      else
+        [
+          File.join(output_root, "apk", "**", "*.apk"),
+          File.join(output_root, "flutter-apk", "*.apk")
+        ]
+      end
+      patterns.flat_map { |pattern| Dir.glob(pattern) }.uniq.sort.map do |path|
+        next nil unless safe_regular_file?(path)
+        classification = classify_artifact_path(path, output_root, type)
+        { path: path, state: classification[:state], flavor: classification[:flavor] }
+      end.compact
+    end
+
+    def classify_artifact_path(path, output_root, type)
+      relative = path.sub(/\A#{Regexp.escape(output_root)}#{Regexp.escape(File::SEPARATOR)}/, "")
+      parts = relative.split(File::SEPARATOR)
+      type == "AAB" ? classify_aab_parts(parts) : classify_apk_parts(parts)
+    end
+
+    def classify_aab_parts(parts)
+      return { state: :ambiguous, flavor: nil } unless parts.length == 3 && parts[0] == "bundle"
+      variant = parts[1]
+      filename = parts[2]
+      if variant == "release"
+        return { state: :variant, flavor: nil } if %w[app-release.aab app.aab].include?(filename)
+        return { state: :ambiguous, flavor: nil }
+      end
+      match = variant.match(/\A(.+)Release\z/)
+      return { state: :ambiguous, flavor: nil } unless match
+      flavor = match[1]
+      accepted = ["app-#{flavor}-release.aab", "app-release.aab", "app.aab"]
+      accepted.include?(filename) ? { state: :variant, flavor: flavor } : { state: :ambiguous, flavor: nil }
+    end
+
+    def classify_apk_parts(parts)
+      if parts.length == 2 && parts[0] == "flutter-apk"
+        return { state: :variant, flavor: nil } if parts[1] == "app-release.apk"
+        match = parts[1].match(/\Aapp-(.+)-release\.apk\z/)
+        return match ? { state: :variant, flavor: match[1] } : { state: :ambiguous, flavor: nil }
+      end
+      return { state: :ambiguous, flavor: nil } unless parts[0] == "apk"
+      if parts.length == 3 && parts[1] == "release"
+        return parts[2] == "app-release.apk" ?
+          { state: :variant, flavor: nil } : { state: :ambiguous, flavor: nil }
+      end
+      if parts.length == 4 && parts[2] == "release"
+        flavor = parts[1]
+        accepted = ["app-#{flavor}-release.apk", "app-release.apk"]
+        return accepted.include?(parts[3]) ?
+          { state: :variant, flavor: flavor } : { state: :ambiguous, flavor: nil }
+      end
+      if parts.length == 3 && (match = parts[1].match(/\A(.+)Release\z/))
+        flavor = match[1]
+        accepted = ["app-#{flavor}-release.apk", "app-release.apk", "app.apk"]
+        return accepted.include?(parts[2]) ?
+          { state: :variant, flavor: flavor } : { state: :ambiguous, flavor: nil }
+      end
+      { state: :ambiguous, flavor: nil }
+    end
+
     def doctor_entry(level, message)
       { level: level, message: message }
     end
@@ -648,6 +725,73 @@ module FlutterPlayStoreRelease
       false
     end
 
+    def valid_key_properties_override?(path)
+      validate_key_properties_override!(path)
+      true
+    rescue ConfigurationError
+      false
+    end
+
+    def validate_key_properties_override!(path)
+      expanded = File.expand_path(path.to_s)
+      parent = File.dirname(expanded)
+      unless File.file?(expanded) && !File.symlink?(expanded) && (File.stat(expanded).mode & 0o777) == 0o600
+        raise ConfigurationError, "ANDROID_KEY_PROPERTIES_PATH must be a private mode-0600 regular file"
+      end
+      unless File.directory?(parent) && !File.symlink?(parent) && (File.stat(parent).mode & 0o777) == 0o700
+        raise ConfigurationError, "ANDROID_KEY_PROPERTIES_PATH must be contained by a private mode-0700 directory"
+      end
+      canonical_parent = File.realpath(parent)
+      canonical_path = File.realpath(expanded)
+      unless File.dirname(canonical_path) == canonical_parent
+        raise ConfigurationError, "ANDROID_KEY_PROPERTIES_PATH escapes its private directory"
+      end
+
+      properties = read_key_properties(canonical_path)
+      required = %w[storeFile storePassword keyAlias keyPassword]
+      unless required.all? { |key| !blank?(properties[key]) }
+        raise ConfigurationError, "ANDROID_KEY_PROPERTIES_PATH is incomplete"
+      end
+      store_file = java_properties_unescape(properties.fetch("storeFile"))
+      unless store_file.start_with?(File::SEPARATOR)
+        raise ConfigurationError, "ANDROID_KEY_PROPERTIES_PATH storeFile must be absolute"
+      end
+      unless safe_regular_file?(store_file) && File.size(store_file).positive?
+        raise ConfigurationError, "ANDROID_KEY_PROPERTIES_PATH storeFile must be a nonempty regular file"
+      end
+      canonical_path
+    rescue Errno::EACCES, Errno::ENOENT, Errno::ENOTDIR
+      raise ConfigurationError, "ANDROID_KEY_PROPERTIES_PATH is not safely readable"
+    end
+
+    def read_key_properties(path)
+      properties = {}
+      File.foreach(path) do |line|
+        stripped = line.chomp
+        next if stripped.strip.empty? || stripped.lstrip.start_with?("#", "!")
+        key, value = stripped.split(/(?<!\\)[=:]/, 2)
+        raise ConfigurationError, "ANDROID_KEY_PROPERTIES_PATH contains an invalid property" if value.nil?
+        normalized_key = key.to_s.strip
+        if properties.key?(normalized_key)
+          raise ConfigurationError, "ANDROID_KEY_PROPERTIES_PATH contains a duplicate property"
+        end
+        properties[normalized_key] = value.to_s.sub(/\A\s+/, "")
+      end
+      properties
+    end
+
+    def prepare_configuration(env)
+      mode = env.fetch("RUN_BUILD_RUNNER", "auto").to_s.strip.downcase
+      unless %w[auto true false].include?(mode)
+        raise ConfigurationError, "RUN_BUILD_RUNNER must be auto, true, or false"
+      end
+      {
+        run_tests: truthy?(env.fetch("RUN_FLUTTER_TESTS", "false")),
+        run_analyze: truthy?(env.fetch("RUN_FLUTTER_ANALYZE", "true")),
+        build_runner: mode
+      }
+    end
+
     def java_properties_unescape(value)
       input = value.to_s
       output = +""
@@ -665,8 +809,25 @@ module FlutterPlayStoreRelease
         if escaped == "u"
           hex = input[(index + 1), 4]
           raise ConfigurationError, "invalid Java properties Unicode escape" unless hex && hex.match?(/\A[0-9A-Fa-f]{4}\z/)
-          output << Integer(hex, 16).chr(Encoding::UTF_8)
-          index += 5
+          unit = Integer(hex, 16)
+          if unit.between?(0xd800, 0xdbff)
+            pair = input[(index + 5), 6]
+            unless pair && pair.match?(/\A\\u[0-9A-Fa-f]{4}\z/)
+              raise ConfigurationError, "invalid Java properties Unicode surrogate pair"
+            end
+            low = Integer(pair[2, 4], 16)
+            unless low.between?(0xdc00, 0xdfff)
+              raise ConfigurationError, "invalid Java properties Unicode surrogate pair"
+            end
+            codepoint = 0x10000 + ((unit - 0xd800) << 10) + (low - 0xdc00)
+            output << codepoint.chr(Encoding::UTF_8)
+            index += 11
+          elsif unit.between?(0xdc00, 0xdfff)
+            raise ConfigurationError, "invalid Java properties Unicode surrogate pair"
+          else
+            output << unit.chr(Encoding::UTF_8)
+            index += 5
+          end
         else
           output << ({ "t" => "\t", "n" => "\n", "r" => "\r", "f" => "\f" }.fetch(escaped, escaped))
           index += 1
@@ -759,6 +920,11 @@ module FlutterPlayStoreRelease
         raise ConfigurationError, "CI refuses a workspace android/key.properties; use the temporary override"
       end
 
+      unless blank?(env["ANDROID_KEY_PROPERTIES_PATH"])
+        override = validate_key_properties_override!(env["ANDROID_KEY_PROPERTIES_PATH"])
+        return { "ANDROID_KEY_PROPERTIES_PATH" => override }
+      end
+
       input_names = %w[ANDROID_KEYSTORE_PATH ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD]
       any_input = input_names.any? { |name| !blank?(env[name]) }
       unless any_input
@@ -832,8 +998,8 @@ module FlutterPlayStoreRelease
       raise ConfigurationError, "APP_PACKAGE_NAME does not match the selected release applicationId"
     end
 
-    def validate_firebase_mapping!(env, actions)
-      mappings = Array(actions.firebase_clients)
+    def validate_firebase_mapping!(env, actions, flavor:)
+      mappings = Array(actions.firebase_clients(flavor: flavor))
       if mappings.empty?
         unless truthy?(env["CONFIRM_FIREBASE_PACKAGE_MATCH"])
           raise ConfigurationError,
@@ -843,11 +1009,15 @@ module FlutterPlayStoreRelease
       end
       package_name = env.fetch("APP_PACKAGE_NAME")
       app_id = env.fetch("FIREBASE_APP_ID")
-      matched = mappings.any? do |mapping|
+      matched = mappings.select do |mapping|
         values = symbolize_keys(mapping)
         values[:package_name].to_s == package_name && values[:app_id].to_s == app_id
       end
-      return if matched
+      conflicts = mappings.select do |mapping|
+        values = symbolize_keys(mapping)
+        values[:package_name].to_s == package_name || values[:app_id].to_s == app_id
+      end
+      return if matched.length == 1 && conflicts.length == 1
       raise ConfigurationError,
         "detected google-services.json package/app-ID mapping does not match the selected release"
     end
@@ -855,13 +1025,11 @@ module FlutterPlayStoreRelease
     def build_once(project_root:, artifact_type:, version_name:, version_code:, flavor:, target:, environment:, actions:)
       type = normalize_artifact_type(artifact_type)
       output_root = File.join(project_root, "build", "app", "outputs")
-      pattern = type == "AAB" ? "bundle/**/*.aab" : "apk/**/*.apk"
-      existing = Dir.glob(File.join(output_root, pattern)).select { |path| safe_regular_file?(path) }
-      if flavor
-        existing.select! { |path| path.downcase.include?(flavor.downcase) }
-      end
-      untouched = Dir.glob(File.join(output_root, pattern)).map { |path| File.expand_path(path) } -
-        existing.map { |path| File.expand_path(path) }
+      selected_flavor = present(flavor)
+      before = artifact_inventory(output_root, type)
+      existing = before.select { |entry| entry[:state] == :variant && entry[:flavor] == selected_flavor }
+        .map { |entry| entry[:path] }
+      unrelated = before.reject { |entry| existing.include?(entry[:path]) }.map { |entry| entry[:path] }
       quarantine = Dir.mktmpdir("artifact-quarantine-", File.dirname(project_root))
       moved = []
       accepted = false
@@ -878,7 +1046,7 @@ module FlutterPlayStoreRelease
         )
         artifact = locate_fresh_artifact(
           project_root: project_root, build_started_at: started_at,
-          prior_outputs: [], flavor: flavor, artifact_type: type
+          prior_outputs: unrelated, flavor: selected_flavor, artifact_type: type
         )
         accepted = true
         FileUtils.remove_entry_secure(quarantine)
@@ -886,9 +1054,9 @@ module FlutterPlayStoreRelease
         artifact
       rescue Exception # rubocop:disable Lint/RescueException -- rollback must run for signals too
         unless accepted
-          Dir.glob(File.join(output_root, pattern)).each do |path|
-            next if untouched.include?(File.expand_path(path))
-            File.unlink(path) if safe_regular_file?(path)
+          artifact_inventory(output_root, type).each do |entry|
+            next unless entry[:state] == :variant && entry[:flavor] == selected_flavor
+            File.unlink(entry[:path]) if safe_regular_file?(entry[:path])
           rescue Errno::ENOENT
             nil
           end
@@ -989,15 +1157,21 @@ module FlutterPlayStoreRelease
         temp.close! rescue nil
       end
     rescue StandardError => error
-      actions.log(:warn, "WARN: could not write the nonsecret release result (#{error.class})") if actions.respond_to?(:log)
+      begin
+        actions.log(:warn, "WARN: could not write the nonsecret release result (#{error.class})") if actions.respond_to?(:log)
+      rescue StandardError
+        nil
+      end
       raise error unless preserve
     end
 
-    def log_result(actions, result)
+    def log_result(actions, result, preserve: nil)
       fields = %w[status target version track artifact_type artifact_path successful_destinations failed_destination message]
       fields.each do |field|
         actions.log(:info, "#{field}=#{result[field].is_a?(Array) ? result[field].join(",") : result[field]}") if actions.respond_to?(:log)
       end
+    rescue StandardError
+      raise unless preserve
     end
 
     def notify_if_requested(env, actions, result)
@@ -1012,7 +1186,11 @@ module FlutterPlayStoreRelease
       )
       actions.notify_slack(webhook: webhook, payload: payload)
     rescue StandardError => error
-      actions.log(:warn, "WARN: Slack notification failed without changing the release result (#{error.class})") if actions.respond_to?(:log)
+      begin
+        actions.log(:warn, "WARN: Slack notification failed without changing the release result (#{error.class})") if actions.respond_to?(:log)
+      rescue StandardError
+        nil
+      end
     end
 
     def run_url(env)
@@ -1059,14 +1237,41 @@ module FlutterPlayStoreRelease
       @dsl.sh("git", "rev-list", "--count", "HEAD", log: false).to_s.strip
     end
 
-    def prepare(run_tests:)
-      @dsl.sh("flutter", "pub", "get")
-      pubspec = File.join(@project_root, "pubspec.yaml")
-      if File.file?(pubspec) && File.read(pubspec).match?(/^\s*build_runner:\s/m)
-        @dsl.sh("flutter", "pub", "run", "build_runner", "build", "--delete-conflicting-outputs")
+    def prepare(run_tests:, run_analyze:, build_runner:)
+      mode = build_runner.to_s
+      unless %w[auto true false].include?(mode)
+        raise ConfigurationError, "RUN_BUILD_RUNNER must be auto, true, or false"
       end
-      @dsl.sh("flutter", "analyze") unless ENV["RUN_FLUTTER_ANALYZE"].to_s.downcase == "false"
+      @dsl.sh("flutter", "pub", "get")
+      if mode == "true" || (mode == "auto" && build_runner_dependency?)
+        @dsl.sh("dart", "run", "build_runner", "build", "--delete-conflicting-outputs")
+      end
+      @dsl.sh("flutter", "analyze") if run_analyze
       @dsl.sh("flutter", "test") if run_tests
+    end
+
+    def build_runner_dependency?
+      pubspec = File.join(@project_root, "pubspec.yaml")
+      return false unless File.file?(pubspec) && !File.symlink?(pubspec)
+      entries = []
+      section = nil
+      File.foreach(pubspec) do |line|
+        next if line.strip.empty? || line.lstrip.start_with?("#")
+        if line.match?(/\A(?:dependencies|dev_dependencies):\s*(?:#.*)?\z/)
+          section = true
+          next
+        end
+        if line.match?(/\A[^[:space:]#][^:]*:/)
+          section = nil
+          next
+        end
+        next unless section
+        match = line.match(/\A([[:space:]]+)([A-Za-z0-9_-]+)\s*:/)
+        entries << [match[1].length, match[2]] if match
+      end
+      return false if entries.empty?
+      minimum = entries.map(&:first).min
+      entries.any? { |indent, name| indent == minimum && name == "build_runner" }
     end
 
     def flutter_build(artifact_type:, build_name:, build_number:, flavor:, target:, environment:)
@@ -1080,8 +1285,8 @@ module FlutterPlayStoreRelease
       FlutterPlayStoreRelease.send(:read_release_application_id, @project_root, flavor)
     end
 
-    def firebase_clients
-      FlutterPlayStoreRelease.send(:read_firebase_clients, @project_root)
+    def firebase_clients(flavor:)
+      FlutterPlayStoreRelease.send(:read_firebase_clients, @project_root, flavor)
     end
 
     def google_play_track_version_codes(**options)
@@ -1138,99 +1343,278 @@ module FlutterPlayStoreRelease
       candidates = %w[android/app/build.gradle.kts android/app/build.gradle].map { |path| File.join(project_root, path) }
       path = candidates.find { |candidate| safe_regular_file?(candidate) }
       return nil unless path
-      text = File.read(path)
-      base = text[/\bapplicationId\s*(?:=\s*)?["']([^"']+)["']/, 1]
-      identifier = base
-      unless blank?(flavor)
-        block = find_gradle_named_block(text, flavor.to_s)
-        if block
-          explicit = block[/\bapplicationId\s*(?:=\s*)?["']([^"']+)["']/, 1]
-          identifier = explicit if explicit
-          suffix = block[/\bapplicationIdSuffix\s*(?:=\s*)?["']([^"']+)["']/, 1]
-          identifier = "#{identifier}#{suffix}" if suffix && identifier
+      tokens = gradle_tokens(File.read(path))
+      return nil unless tokens
+      brace_pairs = gradle_brace_pairs(tokens)
+      return nil unless brace_pairs
+
+      android_blocks = gradle_direct_named_blocks(tokens, 0, tokens.length, "android", brace_pairs)
+      return nil unless android_blocks.length == 1
+      android_open, android_close = android_blocks.first
+
+      default_blocks = gradle_direct_named_blocks(
+        tokens, android_open + 1, android_close, "defaultConfig", brace_pairs
+      )
+      return nil unless default_blocks.length == 1
+      base_values = gradle_static_declarations(tokens, *default_blocks.first, "applicationId", brace_pairs)
+      return nil unless base_values && base_values.length == 1
+      identifier = base_values.first
+
+      selected_flavor = present(flavor)
+      if selected_flavor
+        return nil unless selected_flavor.match?(/\A[A-Za-z0-9_-]+\z/)
+        flavor_containers = gradle_direct_named_blocks(
+          tokens, android_open + 1, android_close, "productFlavors", brace_pairs
+        )
+        return nil unless flavor_containers.length == 1
+        flavor_blocks = gradle_direct_variant_blocks(
+          tokens, flavor_containers.first[0] + 1, flavor_containers.first[1], selected_flavor, brace_pairs
+        )
+        return nil unless flavor_blocks.length == 1
+
+        explicit_values = gradle_static_declarations(tokens, *flavor_blocks.first, "applicationId", brace_pairs)
+        suffix_values = gradle_static_declarations(tokens, *flavor_blocks.first, "applicationIdSuffix", brace_pairs)
+        return nil unless explicit_values && suffix_values
+        return nil if explicit_values.length > 1 || suffix_values.length > 1
+        identifier = explicit_values.first if explicit_values.length == 1
+        identifier = "#{identifier}#{suffix_values.first}" if suffix_values.length == 1
+      end
+
+      build_type_containers = gradle_direct_named_blocks(
+        tokens, android_open + 1, android_close, "buildTypes", brace_pairs
+      )
+      return nil if build_type_containers.length > 1
+      if build_type_containers.length == 1
+        release_blocks = gradle_direct_variant_blocks(
+          tokens, build_type_containers.first[0] + 1, build_type_containers.first[1], "release", brace_pairs
+        )
+        return nil if release_blocks.length > 1
+        if release_blocks.length == 1
+          release_ids = gradle_static_declarations(tokens, *release_blocks.first, "applicationId", brace_pairs)
+          release_suffixes = gradle_static_declarations(
+            tokens, *release_blocks.first, "applicationIdSuffix", brace_pairs
+          )
+          return nil unless release_ids && release_suffixes
+          return nil unless release_ids.empty? && release_suffixes.length <= 1
+          identifier = "#{identifier}#{release_suffixes.first}" if release_suffixes.length == 1
         end
       end
-      release_block = find_gradle_named_block(text, "release")
-      if release_block
-        release_suffix = release_block[/\bapplicationIdSuffix\s*(?:=\s*)?["']([^"']+)["']/, 1]
-        identifier = "#{identifier}#{release_suffix}" if release_suffix && identifier
-      end
-      identifier
-    end
 
-    def find_gradle_named_block(text, name)
-      escaped = Regexp.escape(name)
-      patterns = [
-        /\b#{escaped}\s*\{/m,
-        /\b(?:create|maybeCreate|getByName|named)\s*\(\s*["']#{escaped}["']\s*\)\s*\{/m
-      ]
-      matches = patterns.map { |pattern| pattern.match(text) }.compact
-      match = matches.min_by { |candidate| candidate.begin(0) }
-      return nil unless match
-      opening = text.index("{", match.begin(0))
-      extract_gradle_block(text, opening)
-    end
-
-    def extract_gradle_block(text, opening)
-      return nil unless opening
-      depth = 0
-      quote = nil
-      escaped = false
-      line_comment = false
-      block_comment = false
-      index = opening
-      while index < text.length
-        character = text[index]
-        following = text[index + 1]
-        if line_comment
-          line_comment = false if character == "\n"
-        elsif block_comment
-          if character == "*" && following == "/"
-            block_comment = false
-            index += 1
-          end
-        elsif quote
-          if escaped
-            escaped = false
-          elsif character == "\\"
-            escaped = true
-          elsif character == quote
-            quote = nil
-          end
-        elsif character == "/" && following == "/"
-          line_comment = true
-          index += 1
-        elsif character == "/" && following == "*"
-          block_comment = true
-          index += 1
-        elsif character == '"' || character == "'"
-          quote = character
-        elsif character == "{"
-          depth += 1
-        elsif character == "}"
-          depth -= 1
-          return text[(opening + 1)...index] if depth.zero?
-        end
-        index += 1
-      end
+      identifier.match?(/\A[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+\z/) ? identifier : nil
+    rescue Errno::EACCES, EncodingError
       nil
     end
 
-    def read_firebase_clients(project_root)
-      paths = Dir.glob(File.join(project_root, "**", "google-services.json"))
-      mappings = []
-      paths.each do |path|
-        next unless safe_regular_file?(path)
-        document = JSON.parse(File.read(path))
-        Array(document["client"]).each do |client|
-          app_id = client.dig("client_info", "mobilesdk_app_id")
-          package_name = client.dig("client_info", "android_client_info", "package_name")
-          mappings << { package_name: package_name, app_id: app_id } if package_name && app_id
+    def gradle_tokens(text)
+      tokens = []
+      index = 0
+      while index < text.length
+        character = text[index]
+        following = text[index + 1]
+        if character == "\n"
+          tokens << [:newline, character]
+          index += 1
+        elsif character.match?(/[\t\r ]/)
+          index += 1
+        elsif character == "/" && following == "/"
+          index += 2
+          index += 1 while index < text.length && text[index] != "\n"
+        elsif character == "/" && following == "*"
+          index += 2
+          closed = false
+          while index < text.length
+            tokens << [:newline, "\n"] if text[index] == "\n"
+            if text[index] == "*" && text[index + 1] == "/"
+              index += 2
+              closed = true
+              break
+            end
+            index += 1
+          end
+          return nil unless closed
+        elsif character == '"' || character == "'"
+          quote = character
+          value = +""
+          static = true
+          index += 1
+          closed = false
+          while index < text.length
+            current = text[index]
+            if current == quote
+              index += 1
+              closed = true
+              break
+            elsif current == "\\"
+              static = false
+              index += 1
+              return nil if index >= text.length
+              value << text[index]
+            else
+              static = false if quote == '"' && current == "$"
+              value << current
+            end
+            index += 1
+          end
+          return nil unless closed
+          tokens << [static ? :string : :dynamic_string, value]
+        elsif character.match?(/[A-Za-z_]/)
+          finish = index + 1
+          finish += 1 while finish < text.length && text[finish].match?(/[A-Za-z0-9_]/)
+          tokens << [:identifier, text[index...finish]]
+          index = finish
+        else
+          tokens << [:symbol, character]
+          index += 1
         end
-      rescue JSON::ParserError
-        raise ConfigurationError, "google-services.json is invalid"
+      end
+      tokens
+    end
+
+    def gradle_brace_pairs(tokens)
+      stack = []
+      pairs = {}
+      tokens.each_with_index do |token, index|
+        next unless token[0] == :symbol
+        if token[1] == "{"
+          stack << index
+        elsif token[1] == "}"
+          return nil if stack.empty?
+          opening = stack.pop
+          pairs[opening] = index
+        end
+      end
+      stack.empty? ? pairs : nil
+    end
+
+    def gradle_significant_index(tokens, index, limit)
+      while index < limit && (tokens[index][0] == :newline || tokens[index] == [:symbol, ";"])
+        index += 1
+      end
+      index
+    end
+
+    def gradle_direct_named_blocks(tokens, first, limit, name, brace_pairs)
+      blocks = []
+      index = first
+      while index < limit
+        token = tokens[index]
+        if token == [:symbol, "{"]
+          index = brace_pairs.fetch(index) + 1
+          next
+        end
+        if token == [:identifier, name]
+          opening = gradle_significant_index(tokens, index + 1, limit)
+          if opening < limit && tokens[opening] == [:symbol, "{"]
+            blocks << [opening, brace_pairs.fetch(opening)]
+            index = brace_pairs.fetch(opening) + 1
+            next
+          end
+        end
+        index += 1
+      end
+      blocks
+    end
+
+    def gradle_direct_variant_blocks(tokens, first, limit, name, brace_pairs)
+      factories = %w[create maybeCreate getByName named]
+      blocks = []
+      index = first
+      while index < limit
+        token = tokens[index]
+        if token == [:symbol, "{"]
+          index = brace_pairs.fetch(index) + 1
+          next
+        end
+        opening = nil
+        if token == [:identifier, name]
+          candidate = gradle_significant_index(tokens, index + 1, limit)
+          opening = candidate if candidate < limit && tokens[candidate] == [:symbol, "{"]
+        elsif token[0] == :identifier && factories.include?(token[1])
+          left = gradle_significant_index(tokens, index + 1, limit)
+          value = gradle_significant_index(tokens, left + 1, limit)
+          right = gradle_significant_index(tokens, value + 1, limit)
+          candidate = gradle_significant_index(tokens, right + 1, limit)
+          if left < limit && tokens[left] == [:symbol, "("] && value < limit &&
+              tokens[value] == [:string, name] && right < limit && tokens[right] == [:symbol, ")"] &&
+              candidate < limit && tokens[candidate] == [:symbol, "{"]
+            opening = candidate
+          end
+        end
+        if opening
+          blocks << [opening, brace_pairs.fetch(opening)]
+          index = brace_pairs.fetch(opening) + 1
+        else
+          index += 1
+        end
+      end
+      blocks
+    end
+
+    def gradle_static_declarations(tokens, opening, closing, name, brace_pairs)
+      values = []
+      index = opening + 1
+      while index < closing
+        token = tokens[index]
+        if token == [:symbol, "{"]
+          index = brace_pairs.fetch(index) + 1
+          next
+        end
+        unless token == [:identifier, name]
+          index += 1
+          next
+        end
+
+        value_index = gradle_significant_index(tokens, index + 1, closing)
+        if value_index < closing && tokens[value_index] == [:symbol, "="]
+          value_index = gradle_significant_index(tokens, value_index + 1, closing)
+        end
+        if value_index < closing && tokens[value_index] == [:symbol, "("]
+          string_index = gradle_significant_index(tokens, value_index + 1, closing)
+          right = gradle_significant_index(tokens, string_index + 1, closing)
+          return nil unless string_index < closing && tokens[string_index][0] == :string
+          return nil unless right < closing && tokens[right] == [:symbol, ")"]
+          value = tokens[string_index][1]
+          after = right + 1
+        else
+          return nil unless value_index < closing && tokens[value_index][0] == :string
+          value = tokens[value_index][1]
+          after = value_index + 1
+        end
+        return nil unless after >= closing || tokens[after][0] == :newline || tokens[after] == [:symbol, ";"]
+        values << value
+        index = after
+      end
+      values
+    end
+
+    def read_firebase_clients(project_root, flavor)
+      selected = present(flavor)
+      if selected && !selected.match?(/\A[A-Za-z0-9_-]+\z/)
+        raise ConfigurationError, "selected flavor cannot be mapped to a Firebase source set"
+      end
+      app_root = File.join(project_root, "android", "app")
+      paths = []
+      paths << File.join(app_root, "src", "#{selected}Release", "google-services.json") if selected
+      paths << File.join(app_root, "src", "release", "google-services.json")
+      paths << File.join(app_root, "src", selected, "google-services.json") if selected
+      paths << File.join(app_root, "google-services.json")
+      path = paths.find do |candidate|
+        if File.symlink?(candidate) || (File.exist?(candidate) && !File.file?(candidate))
+          raise ConfigurationError, "selected google-services.json evidence is not a regular file"
+        end
+        safe_regular_file?(candidate)
+      end
+      return [] unless path
+      mappings = []
+      document = JSON.parse(File.read(path))
+      Array(document["client"]).each do |client|
+        app_id = client.dig("client_info", "mobilesdk_app_id")
+        package_name = client.dig("client_info", "android_client_info", "package_name")
+        mappings << { package_name: package_name, app_id: app_id } if package_name && app_id
       end
       mappings
+    rescue JSON::ParserError
+      raise ConfigurationError, "selected google-services.json evidence is invalid"
     end
   end
 end

@@ -449,7 +449,13 @@ fprs_project_transaction_signal() {
     if wait "$FPRS_PROJECT_TRANSACTION_HOOK_PID" 2>/dev/null; then :; else :; fi
     FPRS_PROJECT_TRANSACTION_HOOK_PID=
   fi
-  fprs_project_transaction_error "caught $fprs_transaction_signal; rollback attempted"
+  if [ -f "$FPRS_PROJECT_TRANSACTION_STAGE/rollback-conflict" ]; then
+    fprs_project_transaction_error \
+      "caught $fprs_transaction_signal; rollback attempted; conflict retained safely"
+  else
+    fprs_project_transaction_error \
+      "caught $fprs_transaction_signal; rollback attempted"
+  fi
   fprs_project_transaction_cleanup >/dev/null 2>&1 || true
   exit 3
 }
@@ -502,6 +508,9 @@ root_fd = None
 root_identity = None
 rollback_started = False
 atomic_exchange = None
+atomic_rename_no_replace = None
+quarantine_sequence = 0
+rollback_conflict = False
 
 
 def interrupted(signum, frame):
@@ -542,7 +551,7 @@ def identity(info):
     return (info.st_dev, info.st_ino)
 
 
-def load_atomic_exchange():
+def load_atomic_operations():
     library = ctypes.CDLL(None, use_errno=True)
     if sys.platform == "darwin":
         try:
@@ -558,6 +567,7 @@ def load_atomic_exchange():
         )
         operation.restype = ctypes.c_int
         exchange_flag = 0x00000002
+        no_replace_flag = 0x00000004
     elif sys.platform.startswith("linux"):
         try:
             operation = library.renameat2
@@ -572,23 +582,32 @@ def load_atomic_exchange():
         )
         operation.restype = ctypes.c_int
         exchange_flag = 0x00000002
+        no_replace_flag = 0x00000001
     else:
         raise TransactionFailure()
 
-    def exchange(left_fd, left_name, right_fd, right_name):
+    def rename_with_flag(left_fd, left_name, right_fd, right_name, flag):
         ctypes.set_errno(0)
         result = operation(
             left_fd,
             os.fsencode(left_name),
             right_fd,
             os.fsencode(right_name),
-            exchange_flag,
+            flag,
         )
         if result != 0:
             error_number = ctypes.get_errno() or errno.EIO
             raise OSError(error_number, os.strerror(error_number))
 
-    return exchange
+    def exchange(left_fd, left_name, right_fd, right_name):
+        rename_with_flag(
+            left_fd, left_name, right_fd, right_name, exchange_flag)
+
+    def rename_no_replace(left_fd, left_name, right_fd, right_name):
+        rename_with_flag(
+            left_fd, left_name, right_fd, right_name, no_replace_flag)
+
+    return exchange, rename_no_replace
 
 
 def open_directory(name, parent_fd=None):
@@ -727,6 +746,7 @@ def parent_for(components, relative):
                 "fd": None,
                 "identity": None,
                 "created": False,
+                "relative": relative,
             }
             created_directories.append(created)
             with blocked_mutation():
@@ -841,22 +861,80 @@ def temporary_owned_identity(temporary):
     return None
 
 
+def restore_quarantine(parent_fd, quarantine_name, canonical_name):
+    global rollback_conflict
+    rollback_conflict = True
+    try:
+        atomic_rename_no_replace(
+            parent_fd, quarantine_name, parent_fd, canonical_name)
+    except OSError:
+        return "retained"
+    return "restored"
+
+
+def quarantine_delete(
+        parent_fd,
+        canonical_name,
+        expected_identity,
+        entry_kind,
+        relative,
+        boundary=None):
+    global quarantine_sequence, rollback_conflict
+    quarantine_sequence += 1
+    quarantine_name = ".fprs-project-quarantine.%s.%08d.%s" % (
+        os.path.basename(stage), quarantine_sequence, entry_kind)
+    try:
+        atomic_rename_no_replace(
+            parent_fd, canonical_name, parent_fd, quarantine_name)
+    except FileNotFoundError:
+        return "absent"
+    except OSError:
+        rollback_conflict = True
+        return "blocked"
+    if boundary is not None:
+        test_boundary(boundary, relative, True)
+    try:
+        moved = lstat_at(parent_fd, quarantine_name)
+    except OSError:
+        rollback_conflict = True
+        return "missing"
+    expected_kind = (
+        stat.S_ISREG(moved.st_mode)
+        if entry_kind == "file"
+        else stat.S_ISDIR(moved.st_mode)
+    )
+    if (
+        expected_identity is not None
+        and identity(moved) == expected_identity
+        and expected_kind
+    ):
+        try:
+            if entry_kind == "file":
+                os.unlink(quarantine_name, dir_fd=parent_fd)
+            else:
+                os.rmdir(quarantine_name, dir_fd=parent_fd)
+        except OSError:
+            return restore_quarantine(
+                parent_fd, quarantine_name, canonical_name)
+        return "deleted"
+    return restore_quarantine(parent_fd, quarantine_name, canonical_name)
+
+
 def remove_temporary(temporary, expected_identity=None):
     if not temporary["created"] or temporary["removed"]:
-        return
+        return True
     owned = expected_identity
     if owned is None:
         owned = temporary_owned_identity(temporary)
-    if owned is None:
-        return
-    try:
-        current = lstat_at(temporary["parent_fd"], temporary["name"])
-        if identity(current) != owned:
-            return
-        os.unlink(temporary["name"], dir_fd=temporary["parent_fd"])
-        temporary["removed"] = True
-    except OSError:
-        return
+    result = quarantine_delete(
+        temporary["parent_fd"],
+        temporary["name"],
+        owned,
+        "file",
+        temporary["name"],
+    )
+    temporary["removed"] = True
+    return result in ("deleted", "absent")
 
 
 def publish(record, parent_fd, temporary):
@@ -908,8 +986,8 @@ def publish(record, parent_fd, temporary):
                 publication["mutated"] = False
                 temporary["current_identity"] = temporary["identity"]
                 raise TransactionFailure()
-            os.unlink(temporary["name"], dir_fd=parent_fd)
-            temporary["removed"] = True
+            if not remove_temporary(temporary, record["target_identity"]):
+                raise TransactionFailure()
         else:
             os.link(
                 temporary["name"],
@@ -927,8 +1005,8 @@ def publish(record, parent_fd, temporary):
                 or identity(installed) != temporary["identity"]
             ):
                 raise TransactionFailure()
-            os.unlink(temporary["name"], dir_fd=parent_fd)
-            temporary["removed"] = True
+            if not remove_temporary(temporary, temporary["identity"]):
+                raise TransactionFailure()
     test_boundary("project-after-publish", relative)
     test_boundary("project-write", relative)
 
@@ -1008,38 +1086,20 @@ def rollback_existing(publication, index):
 
 def rollback_created(publication, index):
     parent_fd = publication["parent_fd"]
-    sentinel = create_rollback_file(
-        parent_fd,
-        ".fprs-project-sentinel.%s.%08d" % (os.path.basename(stage), index),
-        0o600,
-    )
     test_boundary(
         "project-rollback-created-before-exchange",
         publication["relative"],
         True,
     )
-    try:
-        atomic_exchange(parent_fd, sentinel["name"], parent_fd, publication["name"])
-    except FileNotFoundError:
-        publication["mutated"] = False
-        remove_temporary(sentinel)
-        return
-    exchanged = lstat_at(parent_fd, sentinel["name"])
-    if identity(exchanged) == publication["installed_identity"]:
-        os.unlink(sentinel["name"], dir_fd=parent_fd)
-        sentinel["removed"] = True
-        try:
-            current = lstat_at(parent_fd, publication["name"])
-        except FileNotFoundError:
-            current = None
-        if current is not None and identity(current) == sentinel["identity"]:
-            os.unlink(publication["name"], dir_fd=parent_fd)
-        publication["mutated"] = False
-        return
-    atomic_exchange(parent_fd, sentinel["name"], parent_fd, publication["name"])
-    sentinel["current_identity"] = sentinel["identity"]
+    quarantine_delete(
+        parent_fd,
+        publication["name"],
+        publication["installed_identity"],
+        "file",
+        publication["relative"],
+        "project-created-file-quarantined",
+    )
     publication["mutated"] = False
-    remove_temporary(sentinel)
 
 
 def rollback():
@@ -1067,14 +1127,27 @@ def rollback():
             if not created["created"]:
                 continue
             try:
-                current = lstat_at(created["parent_fd"], created["name"])
                 expected = created["identity"]
                 if expected is None and created["fd"] is not None:
                     expected = identity(os.fstat(created["fd"]))
-                if expected is None and stat.S_ISDIR(current.st_mode):
-                    expected = identity(current)
-                if stat.S_ISDIR(current.st_mode) and identity(current) == expected:
-                    os.rmdir(created["name"], dir_fd=created["parent_fd"])
+                quarantine_delete(
+                    created["parent_fd"],
+                    created["name"],
+                    expected,
+                    "directory",
+                    created["relative"],
+                    "project-created-directory-quarantined",
+                )
+            except OSError:
+                pass
+        if rollback_conflict:
+            try:
+                marker_fd = os.open(
+                    os.path.join(stage, "rollback-conflict"),
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+                os.close(marker_fd)
             except OSError:
                 pass
     finally:
@@ -1101,7 +1174,7 @@ def close_descriptors():
 try:
     if test_mode and control_dir and not hook_all:
         os.setpgrp()
-    atomic_exchange = load_atomic_exchange()
+    atomic_exchange, atomic_rename_no_replace = load_atomic_operations()
     count = int(count_text)
     fail_after = int(fail_after_text) if fail_after_text else 0
     if count < 0 or fail_after < 0:
@@ -1273,7 +1346,12 @@ fprs_project_transaction_commit() {
     FPRS_PROJECT_TRANSACTION_CONTROL_DIR=
   fi
   if [ "$fprs_transaction_status" -ne 0 ]; then
-    fprs_project_transaction_error 'project write failed; rollback attempted'
+    if [ -f "$FPRS_PROJECT_TRANSACTION_STAGE/rollback-conflict" ]; then
+      fprs_project_transaction_error \
+        'project write failed; rollback attempted; conflict retained safely'
+    else
+      fprs_project_transaction_error 'project write failed; rollback attempted'
+    fi
     fprs_project_transaction_cleanup >/dev/null 2>&1 || true
     return 3
   fi

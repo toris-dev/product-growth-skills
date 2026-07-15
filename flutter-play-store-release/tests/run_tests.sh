@@ -3505,14 +3505,143 @@ os.execv(sys.argv[1], sys.argv[1:])
           "partial journal changed original bytes: $transaction_failure_boundary"
         assert_mode 640 "$transaction_failure_root/existing.txt" \
           "partial journal changed original mode: $transaction_failure_boundary"
-        [ ! -e "$transaction_failure_root/nested" ] ||
-          fail "partial directory journal left a created path: $transaction_failure_boundary"
+        if [ "$transaction_failure_boundary" = project-after-mkdir-syscall ]; then
+          [ -d "$transaction_failure_root/nested" ] ||
+            fail 'unknown directory identity was inferred and deleted'
+        else
+          [ ! -e "$transaction_failure_root/nested" ] ||
+            fail "partial directory journal left a created path: $transaction_failure_boundary"
+        fi
         if find "$transaction_failure_root" -name '.fprs-project-write.*' -print |
           grep . >/dev/null 2>&1
         then
           fail "partial journal left a temporary file: $transaction_failure_boundary"
         fi
       done
+      ;;
+  esac
+
+  case "${FPRS_REVIEW_CASE-all}" in
+    all|quarantine-delete)
+      transaction_quarantine_root="$TMP_ROOT/project transaction/quarantine created file"
+      transaction_quarantine_control="$TMP_ROOT/project transaction/quarantine file control"
+      mkdir -p "$transaction_quarantine_root" "$transaction_quarantine_control"
+      printf 'quarantine file candidate\n' > "$TMP_ROOT/quarantine-file.candidate"
+      env FPRS_TEST_MODE=1 FPRS_TEST_FAIL_PROJECT_WRITE_AFTER=1 \
+        FPRS_TEST_CONTROL_DIR="$transaction_quarantine_control" \
+        FPRS_TEST_PAUSE_AT=project-created-file-quarantined \
+        /bin/bash "$transaction_control_helper" "$TRANSACTION_LIBRARY" \
+        "$transaction_quarantine_root" created.txt \
+        "$TMP_ROOT/quarantine-file.candidate" \
+        > "$transaction_quarantine_control/stdout" \
+        2> "$transaction_quarantine_control/stderr" &
+      transaction_control_pid=$!
+      transaction_wait_for_control_event "$transaction_control_pid" \
+        "$transaction_quarantine_control/event" \
+        'created-file rollback did not expose the quarantine boundary'
+      [ ! -e "$transaction_quarantine_root/created.txt" ] ||
+        fail 'created-file quarantine did not atomically vacate the canonical path'
+      printf 'canonical file user replacement\n' > \
+        "$transaction_quarantine_root/user-replacement"
+      ln "$transaction_quarantine_root/user-replacement" \
+        "$transaction_quarantine_root/user-proof"
+      mv "$transaction_quarantine_root/user-replacement" \
+        "$transaction_quarantine_root/created.txt"
+      : > "$transaction_quarantine_control/continue"
+      if wait "$transaction_control_pid"; then
+        fail 'injected created-file quarantine rollback unexpectedly succeeded'
+      else
+        transaction_status=$?
+      fi
+      [ "$transaction_status" -eq 3 ] ||
+        fail 'created-file quarantine rollback did not return status 3'
+      [ "$transaction_quarantine_root/created.txt" -ef \
+        "$transaction_quarantine_root/user-proof" ] ||
+        fail 'created-file quarantine deletion removed the canonical user replacement'
+      if find "$transaction_quarantine_root" \
+        -name '.fprs-project-quarantine.*' -print | grep . >/dev/null 2>&1
+      then
+        fail 'created-file quarantine left an owned inode after successful deletion'
+      fi
+
+      transaction_quarantine_root="$TMP_ROOT/project transaction/quarantine mismatch restore"
+      transaction_quarantine_control="$TMP_ROOT/project transaction/quarantine mismatch control"
+      mkdir -p "$transaction_quarantine_root" "$transaction_quarantine_control"
+      printf 'quarantine mismatch candidate\n' > \
+        "$TMP_ROOT/quarantine-mismatch.candidate"
+      env FPRS_TEST_MODE=1 FPRS_TEST_FAIL_PROJECT_WRITE_AFTER=1 \
+        FPRS_TEST_CONTROL_DIR="$transaction_quarantine_control" \
+        FPRS_TEST_PAUSE_AT=project-after-publish \
+        /bin/bash "$transaction_control_helper" "$TRANSACTION_LIBRARY" \
+        "$transaction_quarantine_root" created.txt \
+        "$TMP_ROOT/quarantine-mismatch.candidate" \
+        > "$transaction_quarantine_control/stdout" \
+        2> "$transaction_quarantine_control/stderr" &
+      transaction_control_pid=$!
+      transaction_wait_for_control_event "$transaction_control_pid" \
+        "$transaction_quarantine_control/event" \
+        'created-file transaction did not expose the pre-rollback replacement boundary'
+      printf 'quarantined user mismatch\n' > \
+        "$transaction_quarantine_root/user-replacement"
+      ln "$transaction_quarantine_root/user-replacement" \
+        "$transaction_quarantine_root/user-proof"
+      mv -f "$transaction_quarantine_root/user-replacement" \
+        "$transaction_quarantine_root/created.txt"
+      : > "$transaction_quarantine_control/continue"
+      if wait "$transaction_control_pid"; then
+        fail 'injected mismatch quarantine rollback unexpectedly succeeded'
+      else
+        transaction_status=$?
+      fi
+      [ "$transaction_status" -eq 3 ] ||
+        fail 'mismatch quarantine rollback did not return status 3'
+      [ "$transaction_quarantine_root/created.txt" -ef \
+        "$transaction_quarantine_root/user-proof" ] ||
+        fail 'mismatched quarantined user inode was not restored'
+      if find "$transaction_quarantine_root" \
+        -name '.fprs-project-quarantine.*' -print | grep . >/dev/null 2>&1
+      then
+        fail 'restored mismatch remained duplicated in quarantine'
+      fi
+
+      transaction_quarantine_root="$TMP_ROOT/project transaction/quarantine created directory"
+      transaction_quarantine_control="$TMP_ROOT/project transaction/quarantine directory control"
+      mkdir -p "$transaction_quarantine_root" "$transaction_quarantine_control"
+      printf 'quarantine directory candidate\n' > \
+        "$TMP_ROOT/quarantine-directory.candidate"
+      env FPRS_TEST_MODE=1 FPRS_TEST_FAIL_PROJECT_WRITE_AFTER=1 \
+        FPRS_TEST_CONTROL_DIR="$transaction_quarantine_control" \
+        FPRS_TEST_PAUSE_AT=project-created-directory-quarantined \
+        /bin/bash "$transaction_control_helper" "$TRANSACTION_LIBRARY" \
+        "$transaction_quarantine_root" nested/path/created.txt \
+        "$TMP_ROOT/quarantine-directory.candidate" \
+        > "$transaction_quarantine_control/stdout" \
+        2> "$transaction_quarantine_control/stderr" &
+      transaction_control_pid=$!
+      transaction_wait_for_control_event "$transaction_control_pid" \
+        "$transaction_quarantine_control/event" \
+        'created-directory rollback did not expose the quarantine boundary'
+      [ ! -e "$transaction_quarantine_root/nested/path" ] ||
+        fail 'created-directory quarantine did not atomically vacate the canonical path'
+      mkdir "$transaction_quarantine_root/nested/path"
+      printf 'canonical directory user replacement\n' > \
+        "$transaction_quarantine_root/nested/path/user-proof"
+      : > "$transaction_quarantine_control/continue"
+      if wait "$transaction_control_pid"; then
+        fail 'injected created-directory quarantine rollback unexpectedly succeeded'
+      else
+        transaction_status=$?
+      fi
+      [ "$transaction_status" -eq 3 ] ||
+        fail 'created-directory quarantine rollback did not return status 3'
+      grep -F 'canonical directory user replacement' \
+        "$transaction_quarantine_root/nested/path/user-proof" >/dev/null 2>&1 ||
+        fail 'created-directory quarantine deletion removed the canonical user replacement'
+      if find "$transaction_quarantine_root" \
+        -name '.fprs-project-quarantine.*' -print | grep . >/dev/null 2>&1
+      then
+        fail 'created-directory quarantine failed to restore its nonempty parent'
+      fi
       ;;
   esac
 

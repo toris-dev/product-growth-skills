@@ -4199,6 +4199,30 @@ GRADLE
         assert_same_file "$GRADLE_ROOT/multi-token-signing.expected" \
           "$gradle_multi_token_source" \
           'multi-token signing conflict changed the source'
+
+        gradle_adjacent_token_source="$GRADLE_ROOT/adjacent-token-signing.gradle"
+        cat > "$gradle_adjacent_token_source" <<'GRADLE'
+def signingConfig = null; android {signingConfig signingConfigs.debug}
+android {
+}
+GRADLE
+        cp "$gradle_adjacent_token_source" \
+          "$GRADLE_ROOT/adjacent-token-signing.expected"
+        if fprs_gradle_signing_candidate groovy \
+          "$gradle_adjacent_token_source" \
+          "$GRADLE_ROOT/adjacent-token-signing.candidate"
+        then
+          fail 'brace-adjacent signing token was missed during merge'
+        else
+          gradle_status=$?
+        fi
+        [ "$gradle_status" -eq 2 ] ||
+          fail 'brace-adjacent signing conflict did not return status 2'
+        [ ! -e "$GRADLE_ROOT/adjacent-token-signing.candidate" ] ||
+          fail 'brace-adjacent signing conflict published a candidate'
+        assert_same_file "$GRADLE_ROOT/adjacent-token-signing.expected" \
+          "$gradle_adjacent_token_source" \
+          'brace-adjacent signing conflict changed the source'
       fi
 
       if [ "${FPRS_COMPACT_SIGNING_DSL-all}" != groovy ]; then

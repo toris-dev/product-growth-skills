@@ -820,7 +820,15 @@ fprs_gradle_signing_scan() {
       stripped = trim(code)
       structural = structural_code(code)
       first_signing = match(structural, /(^|[^A-Za-z0-9_])(signingConfig|setSigningConfig)([^A-Za-z0-9_]|$)/)
-      first_signing_position = RSTART
+      if (first_signing) {
+        first_signing_match_start = RSTART
+        first_signing_match_length = RLENGTH
+        first_signing_match = substr(structural,
+          first_signing_match_start, first_signing_match_length)
+        first_signing_token_offset = match(first_signing_match,
+          /(signingConfig|setSigningConfig)/)
+        first_signing_position = first_signing_match_start + first_signing_token_offset - 1
+      } else first_signing_position = 0
       assignment_handled = 0
       before_depth = depth
 
@@ -873,12 +881,20 @@ fprs_gradle_signing_scan() {
       while (signing_search_from <= length(structural)) {
         signing_search = substr(structural, signing_search_from)
         if (!match(signing_search, /(^|[^A-Za-z0-9_])(signingConfig|setSigningConfig)([^A-Za-z0-9_]|$)/)) break
-        signing_position = signing_search_from + RSTART - 1
-        signing_search_next = signing_search_from + RSTART + RLENGTH - 1
-        if (!(assignment_handled &&
-              signing_position == first_signing_position) &&
-            android_scope_before(structural, signing_position)) {
-          invalid_count++
+        signing_match_start = RSTART
+        signing_match_length = RLENGTH
+        signing_search_next = signing_search_from + signing_match_start + signing_match_length - 1
+        signing_match = substr(signing_search,
+          signing_match_start, signing_match_length)
+        signing_token_offset = match(signing_match,
+          /(signingConfig|setSigningConfig)/)
+        if (signing_token_offset) {
+          signing_position = signing_search_from + signing_match_start + signing_token_offset - 2
+          if (!(assignment_handled &&
+                signing_position == first_signing_position) &&
+              android_scope_before(structural, signing_position)) {
+            invalid_count++
+          }
         }
         signing_search_from = signing_search_next
       }

@@ -3117,6 +3117,90 @@ SH
   }
 
   case "${FPRS_REVIEW_CASE-all}" in
+    all|shell-signal-windows)
+      for transaction_boundary in \
+        project-dir-created project-temp-created project-published
+      do
+        transaction_control_root="$TMP_ROOT/project transaction/shell signal $transaction_boundary"
+        transaction_control_dir="$TMP_ROOT/project transaction/shell control $transaction_boundary"
+        mkdir -p "$transaction_control_root" "$transaction_control_dir"
+        printf 'shell signal original\r\n' > "$transaction_control_root/existing.txt"
+        chmod 640 "$transaction_control_root/existing.txt"
+        cp "$transaction_control_root/existing.txt" "$TMP_ROOT/shell-signal.expected"
+        case "$transaction_boundary" in
+          project-dir-created)
+            transaction_control_relative='nested/path/created.txt'
+            transaction_shell_signal=HUP
+            ;;
+          project-temp-created)
+            transaction_control_relative='existing.txt'
+            transaction_shell_signal=INT
+            ;;
+          *)
+            transaction_control_relative='existing.txt'
+            transaction_shell_signal=TERM
+            ;;
+        esac
+        env FPRS_TEST_MODE=1 \
+          FPRS_TEST_CONTROL_DIR="$transaction_control_dir" \
+          FPRS_TEST_PAUSE_AT="$transaction_boundary" \
+          python3 -c '
+import os
+import signal
+import sys
+for caught in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(caught, signal.SIG_DFL)
+os.execv(sys.argv[1], sys.argv[1:])
+' /bin/bash "$transaction_control_helper" "$TRANSACTION_LIBRARY" \
+          "$transaction_control_root" "$transaction_control_relative" \
+          "$TMP_ROOT/signal.candidate" > "$transaction_control_dir/stdout" \
+          2> "$transaction_control_dir/stderr" &
+        transaction_control_pid=$!
+        transaction_wait_for_control_event "$transaction_control_pid" \
+          "$transaction_control_dir/event" \
+          "transaction did not expose shell signal boundary: $transaction_boundary"
+        transaction_control_pgid=$(sed -n '1p' "$transaction_control_dir/event")
+        kill -s "$transaction_shell_signal" "$transaction_control_pid" 2>/dev/null ||
+          fail "could not signal only the transaction shell: $transaction_boundary"
+        transaction_wait_attempt=0
+        while kill -0 "$transaction_control_pid" 2>/dev/null &&
+          [ "$transaction_wait_attempt" -lt 300 ]
+        do
+          sleep 0.01
+          transaction_wait_attempt=$((transaction_wait_attempt + 1))
+        done
+        if kill -0 "$transaction_control_pid" 2>/dev/null; then
+          kill -TERM -- "-$transaction_control_pgid" 2>/dev/null || true
+          wait "$transaction_control_pid" 2>/dev/null || true
+          fail "transaction shell did not forward and await rollback: $transaction_boundary"
+        fi
+        if wait "$transaction_control_pid"; then
+          fail "shell-only signal unexpectedly succeeded: $transaction_boundary"
+        else
+          transaction_status=$?
+        fi
+        [ "$transaction_status" -eq 3 ] ||
+          fail "shell-only signal did not return 3: $transaction_boundary"
+        grep -F 'rollback attempted' "$transaction_control_dir/stderr" \
+          >/dev/null 2>&1 ||
+          fail "shell-only signal did not report rollback: $transaction_boundary"
+        assert_same_file "$TMP_ROOT/shell-signal.expected" \
+          "$transaction_control_root/existing.txt" \
+          "shell-only signal changed original bytes: $transaction_boundary"
+        assert_mode 640 "$transaction_control_root/existing.txt" \
+          "shell-only signal changed original mode: $transaction_boundary"
+        [ ! -e "$transaction_control_root/nested" ] ||
+          fail "shell-only signal left a created directory: $transaction_boundary"
+        if find "$transaction_control_root" -name '.fprs-project-write.*' -print |
+          grep . >/dev/null 2>&1
+        then
+          fail "shell-only signal left a temporary file: $transaction_boundary"
+        fi
+      done
+      ;;
+  esac
+
+  case "${FPRS_REVIEW_CASE-all}" in
     all|signal-windows)
       for transaction_boundary in \
         project-dir-created project-temp-created project-published
@@ -3264,6 +3348,171 @@ SH
         [ "$transaction_replacement_root/created.txt" -ef \
           "$transaction_replacement_root/user-proof" ] ||
         fail 'rollback removed a user replacement with candidate-identical bytes'
+      ;;
+  esac
+
+  case "${FPRS_REVIEW_CASE-all}" in
+    all|atomic-cas-gaps)
+      transaction_cas_root="$TMP_ROOT/project transaction/forward existing CAS"
+      transaction_cas_control="$TMP_ROOT/project transaction/forward existing control"
+      mkdir -p "$transaction_cas_root" "$transaction_cas_control"
+      printf 'existing CAS original\n' > "$transaction_cas_root/existing.txt"
+      printf 'existing CAS candidate\n' > "$TMP_ROOT/existing-cas.candidate"
+      env FPRS_TEST_MODE=1 \
+        FPRS_TEST_CONTROL_DIR="$transaction_cas_control" \
+        FPRS_TEST_PAUSE_AT=project-existing-before-exchange \
+        /bin/bash "$transaction_control_helper" "$TRANSACTION_LIBRARY" \
+        "$transaction_cas_root" existing.txt "$TMP_ROOT/existing-cas.candidate" \
+        > "$transaction_cas_control/stdout" 2> "$transaction_cas_control/stderr" &
+      transaction_control_pid=$!
+      transaction_wait_for_control_event "$transaction_control_pid" \
+        "$transaction_cas_control/event" \
+        'transaction did not expose the existing-target atomic exchange boundary'
+      printf 'late existing user replacement\n' > "$transaction_cas_root/user-replacement"
+      ln "$transaction_cas_root/user-replacement" "$transaction_cas_root/user-proof"
+      mv -f "$transaction_cas_root/user-replacement" "$transaction_cas_root/existing.txt"
+      : > "$transaction_cas_control/continue"
+      if wait "$transaction_control_pid"; then
+        fail 'existing-target CAS accepted a late user replacement'
+      else
+        transaction_status=$?
+      fi
+      [ "$transaction_status" -eq 3 ] ||
+        fail 'existing-target CAS failure did not return status 3'
+      [ "$transaction_cas_root/existing.txt" -ef "$transaction_cas_root/user-proof" ] ||
+        fail 'existing-target CAS overwrote a late user replacement'
+
+      transaction_cas_root="$TMP_ROOT/project transaction/forward created CAS"
+      transaction_cas_control="$TMP_ROOT/project transaction/forward created control"
+      mkdir -p "$transaction_cas_root" "$transaction_cas_control"
+      printf 'created CAS candidate\n' > "$TMP_ROOT/created-cas.candidate"
+      env FPRS_TEST_MODE=1 \
+        FPRS_TEST_CONTROL_DIR="$transaction_cas_control" \
+        FPRS_TEST_PAUSE_AT=project-created-before-link \
+        /bin/bash "$transaction_control_helper" "$TRANSACTION_LIBRARY" \
+        "$transaction_cas_root" created.txt "$TMP_ROOT/created-cas.candidate" \
+        > "$transaction_cas_control/stdout" 2> "$transaction_cas_control/stderr" &
+      transaction_control_pid=$!
+      transaction_wait_for_control_event "$transaction_control_pid" \
+        "$transaction_cas_control/event" \
+        'transaction did not expose the created-target no-replace boundary'
+      printf 'late created user replacement\n' > "$transaction_cas_root/user-replacement"
+      ln "$transaction_cas_root/user-replacement" "$transaction_cas_root/user-proof"
+      mv "$transaction_cas_root/user-replacement" "$transaction_cas_root/created.txt"
+      : > "$transaction_cas_control/continue"
+      if wait "$transaction_control_pid"; then
+        fail 'created-target CAS accepted a late user target'
+      else
+        transaction_status=$?
+      fi
+      [ "$transaction_status" -eq 3 ] ||
+        fail 'created-target no-replace failure did not return status 3'
+      [ "$transaction_cas_root/created.txt" -ef "$transaction_cas_root/user-proof" ] ||
+        fail 'created-target publication overwrote a late user target'
+
+      transaction_cas_root="$TMP_ROOT/project transaction/rollback existing CAS"
+      transaction_cas_control="$TMP_ROOT/project transaction/rollback existing control"
+      mkdir -p "$transaction_cas_root" "$transaction_cas_control"
+      printf 'rollback existing original\n' > "$transaction_cas_root/existing.txt"
+      printf 'rollback existing candidate\n' > "$TMP_ROOT/rollback-existing.candidate"
+      env FPRS_TEST_MODE=1 FPRS_TEST_FAIL_PROJECT_WRITE_AFTER=1 \
+        FPRS_TEST_CONTROL_DIR="$transaction_cas_control" \
+        FPRS_TEST_PAUSE_AT=project-rollback-existing-before-exchange \
+        /bin/bash "$transaction_control_helper" "$TRANSACTION_LIBRARY" \
+        "$transaction_cas_root" existing.txt "$TMP_ROOT/rollback-existing.candidate" \
+        > "$transaction_cas_control/stdout" 2> "$transaction_cas_control/stderr" &
+      transaction_control_pid=$!
+      transaction_wait_for_control_event "$transaction_control_pid" \
+        "$transaction_cas_control/event" \
+        'rollback did not expose the existing-target atomic exchange boundary'
+      printf 'rollback existing user replacement\n' > "$transaction_cas_root/user-replacement"
+      ln "$transaction_cas_root/user-replacement" "$transaction_cas_root/user-proof"
+      mv -f "$transaction_cas_root/user-replacement" "$transaction_cas_root/existing.txt"
+      : > "$transaction_cas_control/continue"
+      if wait "$transaction_control_pid"; then
+        fail 'injected existing-target rollback unexpectedly succeeded'
+      else
+        transaction_status=$?
+      fi
+      [ "$transaction_status" -eq 3 ] ||
+        fail 'existing-target rollback CAS did not return status 3'
+      [ "$transaction_cas_root/existing.txt" -ef "$transaction_cas_root/user-proof" ] ||
+        fail 'existing-target rollback CAS overwrote a user replacement'
+
+      transaction_cas_root="$TMP_ROOT/project transaction/rollback created CAS"
+      transaction_cas_control="$TMP_ROOT/project transaction/rollback created control"
+      mkdir -p "$transaction_cas_root" "$transaction_cas_control"
+      printf 'rollback created candidate\n' > "$TMP_ROOT/rollback-created.candidate"
+      env FPRS_TEST_MODE=1 FPRS_TEST_FAIL_PROJECT_WRITE_AFTER=1 \
+        FPRS_TEST_CONTROL_DIR="$transaction_cas_control" \
+        FPRS_TEST_PAUSE_AT=project-rollback-created-before-exchange \
+        /bin/bash "$transaction_control_helper" "$TRANSACTION_LIBRARY" \
+        "$transaction_cas_root" created.txt "$TMP_ROOT/rollback-created.candidate" \
+        > "$transaction_cas_control/stdout" 2> "$transaction_cas_control/stderr" &
+      transaction_control_pid=$!
+      transaction_wait_for_control_event "$transaction_control_pid" \
+        "$transaction_cas_control/event" \
+        'rollback did not expose the created-target sentinel exchange boundary'
+      printf 'rollback created user replacement\n' > "$transaction_cas_root/user-replacement"
+      ln "$transaction_cas_root/user-replacement" "$transaction_cas_root/user-proof"
+      mv -f "$transaction_cas_root/user-replacement" "$transaction_cas_root/created.txt"
+      : > "$transaction_cas_control/continue"
+      if wait "$transaction_control_pid"; then
+        fail 'injected created-target rollback unexpectedly succeeded'
+      else
+        transaction_status=$?
+      fi
+      [ "$transaction_status" -eq 3 ] ||
+        fail 'created-target rollback CAS did not return status 3'
+      [ "$transaction_cas_root/created.txt" -ef "$transaction_cas_root/user-proof" ] ||
+        fail 'created-target rollback CAS removed a user replacement'
+      ;;
+  esac
+
+  case "${FPRS_REVIEW_CASE-all}" in
+    all|partial-journals)
+      for transaction_failure_boundary in \
+        project-after-mkdir-syscall \
+        project-after-open-syscall \
+        project-after-publish-syscall
+      do
+        transaction_failure_root="$TMP_ROOT/project transaction/journal $transaction_failure_boundary"
+        mkdir -p "$transaction_failure_root"
+        printf 'journal original\r\n' > "$transaction_failure_root/existing.txt"
+        chmod 640 "$transaction_failure_root/existing.txt"
+        cp "$transaction_failure_root/existing.txt" "$TMP_ROOT/journal.expected"
+        case "$transaction_failure_boundary" in
+          project-after-mkdir-syscall)
+            transaction_failure_relative='nested/path/created.txt'
+            ;;
+          *) transaction_failure_relative='existing.txt' ;;
+        esac
+        if env FPRS_TEST_MODE=1 \
+          FPRS_TEST_FAIL_AT="$transaction_failure_boundary" \
+          /bin/bash "$transaction_control_helper" "$TRANSACTION_LIBRARY" \
+          "$transaction_failure_root" "$transaction_failure_relative" \
+          "$TMP_ROOT/signal.candidate" > "$TMP_ROOT/journal.stdout" \
+          2> "$TMP_ROOT/journal.stderr"
+        then
+          fail "post-syscall journal failure unexpectedly succeeded: $transaction_failure_boundary"
+        else
+          transaction_status=$?
+        fi
+        [ "$transaction_status" -eq 3 ] ||
+          fail "post-syscall journal failure did not return 3: $transaction_failure_boundary"
+        assert_same_file "$TMP_ROOT/journal.expected" \
+          "$transaction_failure_root/existing.txt" \
+          "partial journal changed original bytes: $transaction_failure_boundary"
+        assert_mode 640 "$transaction_failure_root/existing.txt" \
+          "partial journal changed original mode: $transaction_failure_boundary"
+        [ ! -e "$transaction_failure_root/nested" ] ||
+          fail "partial directory journal left a created path: $transaction_failure_boundary"
+        if find "$transaction_failure_root" -name '.fprs-project-write.*' -print |
+          grep . >/dev/null 2>&1
+        then
+          fail "partial journal left a temporary file: $transaction_failure_boundary"
+        fi
+      done
       ;;
   esac
 
@@ -3483,6 +3732,58 @@ KOTLIN
         fail 'missing emitted-contract properties path evaluator'
       type fprs_gradle_signing_contract_guard_check >/dev/null 2>&1 ||
         fail 'missing emitted-contract credential evaluator'
+      type fprs_gradle_signing_validate_emitted_guard >/dev/null 2>&1 ||
+        fail 'missing emitted Gradle guard structural validator'
+      fprs_gradle_signing_validate_emitted_guard groovy "$GRADLE_CANDIDATE" ||
+        fail 'structural validator rejected the emitted Groovy guard'
+      fprs_gradle_signing_validate_emitted_guard kotlin "$gradle_kotlin_candidate" ||
+        fail 'structural validator rejected the emitted Kotlin guard'
+      gradle_mutated_guard="$GRADLE_ROOT/mutated-inverted-guard.gradle"
+      awk '
+        !changed && /if \(fprsReleaseSigningTaskRequested\)/ {
+          sub(/if \(fprsReleaseSigningTaskRequested\)/,
+              "if (!fprsReleaseSigningTaskRequested)")
+          changed = 1
+        }
+        { print }
+      ' "$GRADLE_CANDIDATE" > "$gradle_mutated_guard"
+      if fprs_gradle_signing_validate_emitted_guard groovy "$gradle_mutated_guard"
+      then
+        fail 'structural validator accepted an inverted release guard'
+      else
+        gradle_status=$?
+      fi
+      [ "$gradle_status" -eq 2 ] ||
+        fail 'inverted release guard did not return structural status 2'
+      gradle_mutated_guard="$GRADLE_ROOT/mutated-task-any.gradle"
+      sed 's/gradle\.startParameter\.taskNames\.any/gradle.startParameter.taskNames.collect/' \
+        "$GRADLE_CANDIDATE" > "$gradle_mutated_guard"
+      if fprs_gradle_signing_validate_emitted_guard groovy "$gradle_mutated_guard"
+      then
+        fail 'structural validator accepted a guard without requested-task any'
+      else
+        gradle_status=$?
+      fi
+      [ "$gradle_status" -eq 2 ] ||
+        fail 'removed requested-task any did not return structural status 2'
+      gradle_mutated_guard="$GRADLE_ROOT/mutated-load-outside-guard.gradle"
+      awk '
+        /def fprsKeyProperties =/ {
+          print
+          print "    fprsKeyPropertiesFile.withInputStream { fprsInput -> fprsKeyProperties.load(fprsInput) }"
+          next
+        }
+        /fprsKeyPropertiesFile\.withInputStream/ { next }
+        { print }
+      ' "$GRADLE_CANDIDATE" > "$gradle_mutated_guard"
+      if fprs_gradle_signing_validate_emitted_guard groovy "$gradle_mutated_guard"
+      then
+        fail 'structural validator accepted credential loading outside the release guard'
+      else
+        gradle_status=$?
+      fi
+      [ "$gradle_status" -eq 2 ] ||
+        fail 'unguarded credential load did not return structural status 2'
       gradle_groovy_contract="$GRADLE_ROOT/groovy.contract"
       gradle_kotlin_contract="$GRADLE_ROOT/kotlin.contract"
       fprs_gradle_signing_extract_emitted_contract "$GRADLE_CANDIDATE" \
@@ -3711,6 +4012,13 @@ android {
     // END flutter-play-store-release
 }
 /$
+def escapedDollarSlashyDocumentation = $/
+$/$$
+}
+// BEGIN flutter-play-store-release schema=1
+android { buildTypes { release { signingConfig signingConfigs.debug } } }
+// END flutter-play-store-release
+/$
 android {
 }
 GRADLE
@@ -3772,6 +4080,55 @@ KOTLIN
       assert_same_file "$gradle_setter_kotlin_source" \
         "$GRADLE_ROOT/setter-signing-kotlin.candidate" \
         'Kotlin setter-form user signing was overwritten by an owned block'
+
+      gradle_unbalanced_setter="$GRADLE_ROOT/unbalanced-setter.gradle"
+      cat > "$gradle_unbalanced_setter" <<'GRADLE'
+android {
+    signingConfigs {
+        upload {
+            storeFile file("user-owned.jks")
+        }
+    }
+    buildTypes {
+        release {
+            setSigningConfig(signingConfigs.upload
+        }
+    }
+}
+GRADLE
+      if fprs_gradle_signing_candidate groovy "$gradle_unbalanced_setter" \
+        "$GRADLE_ROOT/unbalanced-setter.candidate"
+      then
+        fail 'missing-close setter syntax was accepted as direct signing'
+      else
+        gradle_status=$?
+      fi
+      [ "$gradle_status" -eq 2 ] ||
+        fail 'missing-close setter syntax did not return status 2'
+
+      cat > "$gradle_unbalanced_setter" <<'GRADLE'
+android {
+    signingConfigs {
+        upload {
+            storeFile file("user-owned.jks")
+        }
+    }
+    buildTypes {
+        release {
+            setSigningConfig signingConfigs.upload)
+        }
+    }
+}
+GRADLE
+      if fprs_gradle_signing_candidate groovy "$gradle_unbalanced_setter" \
+        "$GRADLE_ROOT/unbalanced-command-setter.candidate"
+      then
+        fail 'missing-open setter syntax was accepted as direct signing'
+      else
+        gradle_status=$?
+      fi
+      [ "$gradle_status" -eq 2 ] ||
+        fail 'missing-open setter syntax did not return status 2'
       ;;
   esac
 

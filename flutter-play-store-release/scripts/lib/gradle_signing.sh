@@ -102,6 +102,116 @@ fprs_gradle_signing_guard_check() {
   return 0
 }
 
+fprs_gradle_signing_validate_emitted_guard() {
+  [ "$#" -eq 2 ] && [ -f "$2" ] && [ ! -L "$2" ] || return 2
+  case "$1" in groovy|kotlin) ;; *) return 2 ;; esac
+  local fprs_gradle_guard_report fprs_gradle_guard_marker_status
+  local fprs_gradle_guard_begin fprs_gradle_guard_end
+  fprs_gradle_guard_report=$(mktemp \
+    "${TMPDIR:-/tmp}/.fprs-gradle-guard.XXXXXX" 2>/dev/null) || return 1
+  if fprs_gradle_signing_validate_markers "$2" "$fprs_gradle_guard_report"; then
+    fprs_gradle_guard_marker_status=0
+  else
+    fprs_gradle_guard_marker_status=$?
+  fi
+  if [ "$fprs_gradle_guard_marker_status" -ne 10 ]; then
+    rm -f -- "$fprs_gradle_guard_report"
+    return 2
+  fi
+  fprs_gradle_guard_begin=$(sed -n '1p' "$fprs_gradle_guard_report")
+  fprs_gradle_guard_end=$(sed -n '2p' "$fprs_gradle_guard_report")
+  rm -f -- "$fprs_gradle_guard_report"
+  case "$fprs_gradle_guard_begin:$fprs_gradle_guard_end" in
+    *[!0-9:]*|:|*:|:*) return 2 ;;
+  esac
+  [ "$fprs_gradle_guard_begin" -lt "$fprs_gradle_guard_end" ] || return 2
+  awk -v dsl="$1" -v begin="$fprs_gradle_guard_begin" \
+      -v end="$fprs_gradle_guard_end" '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    function brace_delta(value,    i, character, opens, closes, quote, escaped) {
+      opens = closes = 0
+      quote = ""
+      escaped = 0
+      for (i = 1; i <= length(value); i++) {
+        character = substr(value, i, 1)
+        if (quote != "") {
+          if (escaped) escaped = 0
+          else if (character == "\\") escaped = 1
+          else if (character == quote) quote = ""
+        } else if (character == "\"" || character == "\047") {
+          quote = character
+        } else if (character == "{") opens++
+        else if (character == "}") closes++
+      }
+      return opens - closes
+    }
+    function inside_release_guard(before,    guard) {
+      for (guard in release_guard_depth) {
+        if (before >= guard) return 1
+      }
+      return 0
+    }
+    {
+      if (NR <= begin || NR >= end) next
+      line = $0
+      sub(/\r$/, "", line)
+      stripped = trim(line)
+      before_depth = depth
+      if (stripped ~ /^(def|val)[[:space:]]+fprsReleaseSigningTaskRequested[[:space:]]*=[[:space:]]*gradle\.startParameter\.taskNames\.any[[:space:]]*\{[[:space:]]*fprsRequestedTask[[:space:]]*->[[:space:]]*$/) {
+        task_any_count++
+      }
+      if (stripped ~ /^(def|val)[[:space:]]+fprsDirectTask[[:space:]]*=.*fprsRequestedTask.*Locale\.ROOT/) {
+        direct_task_count++
+      }
+      if (stripped ~ /fprsTerminalTaskPrefixes\.any[[:space:]]*\{.*fprsDirectTask\.startsWith\(fprsPrefix\).*&&.*fprsDirectTask\.endsWith\(fprsReleaseToken\).*\}[[:space:]]*\|\|[[:space:]]*$/) {
+        terminal_pattern_count++
+      }
+      if (stripped ~ /fprsContainingTaskPrefixes\.any[[:space:]]*\{.*fprsDirectTask\.startsWith\(fprsPrefix\).*&&.*fprsDirectTask\.contains\(fprsReleaseToken\).*\}[[:space:]]*$/) {
+        containing_pattern_count++
+      }
+      if (stripped == "if (fprsReleaseSigningTaskRequested) {") {
+        positive_guard_count++
+        release_guard_depth[before_depth + 1] = 1
+      }
+      if (stripped ~ /fprsKeyProperties\.load\(fprsInput\)/) {
+        load_count++
+        if (inside_release_guard(before_depth)) guarded_load_count++
+      }
+      if (stripped ~ /^if \(!fprsKeyPropertiesFile\.isFile(\(\))?\) \{$/) {
+        missing_file_check_count++
+        if (inside_release_guard(before_depth)) guarded_check_count++
+      }
+      if (stripped == "if (!fprsSigningValuesComplete) {") {
+        incomplete_check_count++
+        if (inside_release_guard(before_depth)) guarded_check_count++
+      }
+      if (stripped ~ /^if \(!file\(fprsStoreFileValue(!{0,2})\)\.isFile(\(\))?\) \{$/) {
+        keystore_check_count++
+        if (inside_release_guard(before_depth)) guarded_check_count++
+      }
+
+      depth += brace_delta(line)
+      if (depth < 0) malformed = 1
+      for (guard in release_guard_depth) {
+        if (depth < guard) delete release_guard_depth[guard]
+      }
+    }
+    END {
+      if (depth != 0 || malformed ||
+          task_any_count != 1 || direct_task_count != 1 ||
+          terminal_pattern_count != 1 || containing_pattern_count != 1 ||
+          positive_guard_count != 2 || load_count != 1 ||
+          guarded_load_count != 1 || missing_file_check_count != 1 ||
+          incomplete_check_count != 1 || keystore_check_count != 1 ||
+          guarded_check_count != 3) exit 2
+    }
+  ' "$2"
+}
+
 fprs_gradle_signing_extract_emitted_contract() {
   [ "$#" -eq 2 ] && [ -f "$1" ] && [ ! -L "$1" ] || return 2
   awk '
@@ -426,7 +536,9 @@ fprs_gradle_signing_validate_markers() {
         sequence = substr(raw, i, 3)
         pair = substr(raw, i, 2)
         if (dollar_slashy) {
-          if (pair == "/$") {
+          if (pair == "$/" || pair == "$$") {
+            i++
+          } else if (pair == "/$") {
             dollar_slashy = 0
             i++
           }
@@ -534,7 +646,9 @@ fprs_gradle_signing_scan() {
         sequence = substr(raw, i, 3)
         pair = substr(raw, i, 2)
         if (dollar_slashy) {
-          if (pair == "/$") {
+          if (pair == "$/" || pair == "$$") {
+            i++
+          } else if (pair == "/$") {
             dollar_slashy = 0
             i++
           }
@@ -636,9 +750,14 @@ fprs_gradle_signing_scan() {
           assignment_name = compact
           return "custom"
         }
-        if (compact ~ /^setSigningConfig\(?signingConfigs\.[A-Za-z][A-Za-z0-9_]*\)?$/) {
-          sub(/^setSigningConfig\(?signingConfigs\./, "", compact)
+        if (compact ~ /^setSigningConfig\(signingConfigs\.[A-Za-z][A-Za-z0-9_]*\)$/) {
+          sub(/^setSigningConfig\(signingConfigs\./, "", compact)
           sub(/\)$/, "", compact)
+          assignment_name = compact
+          return "custom"
+        }
+        if (compact ~ /^setSigningConfigsigningConfigs\.[A-Za-z][A-Za-z0-9_]*$/) {
+          sub(/^setSigningConfigsigningConfigs\./, "", compact)
           assignment_name = compact
           return "custom"
         }
@@ -1068,6 +1187,12 @@ fprs_gradle_signing_candidate() {
   ' "$fprs_gradle_clean" > "$fprs_gradle_private_output" || {
     rm -rf -- "$fprs_gradle_stage"
     return 1
+  }
+  fprs_gradle_signing_validate_emitted_guard "$1" \
+    "$fprs_gradle_private_output" || {
+    fprs_gradle_signing_error 'generated signing guard is structurally invalid'
+    rm -rf -- "$fprs_gradle_stage"
+    return 2
   }
   fprs_gradle_mode=$(fprs_gradle_signing_file_mode "$2") || {
     rm -rf -- "$fprs_gradle_stage"

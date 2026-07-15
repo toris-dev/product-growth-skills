@@ -395,11 +395,12 @@ fprs_extract_gradle_wrapper_version() {
 
 fprs_extract_java_compatibility() {
   fprs_gradle_without_comments "$gradle_path" | awk '
-    /JavaVersion\.VERSION_[0-9]+/ {
+    /JavaVersion\.VERSION_([0-9]+|1_[0-9]+)([^A-Za-z0-9_]|$)/ {
       line = $0
       sub(/^.*JavaVersion\.VERSION_/, "", line)
-      sub(/[^0-9].*/, "", line)
-      if (line != "") {
+      sub(/[^0-9_].*/, "", line)
+      if (line ~ /^1_[0-9]+$/) sub(/^1_/, "", line)
+      if (line ~ /^[0-9]+$/) {
         print line
         exit
       }
@@ -416,38 +417,244 @@ fprs_extract_release_signing_reference() {
       closes = gsub(/\}/, "}", copy)
       return opens - closes
     }
+    function trim_assignment(value) {
+      if (!match(value, /signingConfig([[:space:]]+|[[:space:]]*=[[:space:]]*)/)) return ""
+      value = substr(value, RSTART + RLENGTH)
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      while (value ~ /[;}][[:space:]]*$/) {
+        sub(/[;}][[:space:]]*$/, "", value)
+        sub(/[[:space:]]+$/, "", value)
+      }
+      return value
+    }
+    function classify_reference(value, compact) {
+      compact = value
+      gsub(/[[:space:]]/, "", compact)
+      if (compact == "signingConfigs.debug" ||
+          compact ~ /^signingConfigs\.getByName\(["\047]debug["\047]\)$/ ||
+          compact ~ /^signingConfigs\[["\047]debug["\047]\]$/ ||
+          compact ~ /^signingConfigs\.named\(["\047]debug["\047]\)\.get\(\)$/) {
+        return "debug"
+      }
+      if (compact ~ /^signingConfigs\.[A-Za-z][A-Za-z0-9_]*$/ ||
+          compact ~ /^signingConfigs\.getByName\(["\047][A-Za-z][A-Za-z0-9_]*["\047]\)$/ ||
+          compact ~ /^signingConfigs\[["\047][A-Za-z][A-Za-z0-9_]*["\047]\]$/ ||
+          compact ~ /^signingConfigs\.named\(["\047][A-Za-z][A-Za-z0-9_]*["\047]\)\.get\(\)$/) {
+        return "release"
+      }
+      return "unknown"
+    }
     !inside && /buildTypes[[:space:]]*\{/ {
       inside = 1
       depth = brace_delta($0)
+      if (depth <= 0) inside = 0
       next
     }
     inside {
       line = $0
+      release_declaration_line = 0
       if (depth == 1 &&
           (line ~ /^[[:space:]]*release[[:space:]]*\{/ ||
            line ~ /^[[:space:]]*(getByName|named)[[:space:]]*\([[:space:]]*"release"[[:space:]]*\)[[:space:]]*\{/ ||
            line ~ /^[[:space:]]*(getByName|named)[[:space:]]*\([[:space:]]*\047release\047[[:space:]]*\)[[:space:]]*\{/)) {
         in_release = 1
-        reference = ""
+        release_declaration_line = 1
       }
       if (in_release && line ~ /signingConfig([[:space:]]|=)/) {
-        reference = "unknown"
-        if (line ~ /signingConfigs\.getByName[[:space:]]*\(/) {
-          if (line ~ /signingConfigs\.getByName[[:space:]]*\([[:space:]]*["\047]debug["\047]/) reference = "debug"
-          else if (line ~ /signingConfigs\.getByName[[:space:]]*\([[:space:]]*["\047][A-Za-z][A-Za-z0-9_]*["\047]/) reference = "release"
-        } else if (line ~ /signingConfigs[[:space:]]*\[/) {
-          if (line ~ /signingConfigs[[:space:]]*\[[[:space:]]*["\047]debug["\047]/) reference = "debug"
-          else if (line ~ /signingConfigs[[:space:]]*\[[[:space:]]*["\047][A-Za-z][A-Za-z0-9_]*["\047]/) reference = "release"
-        } else if (line ~ /signingConfigs\.debug([^A-Za-z0-9_]|$)/) reference = "debug"
-        else if (line ~ /signingConfigs\.[A-Za-z][A-Za-z0-9_]*/) reference = "release"
+        signing_assignment_count++
+        assignment_direct = (depth == 2 || release_declaration_line)
+        match(line, /signingConfig([[:space:]]+|[[:space:]]*=[[:space:]]*)/)
+        assignment_prefix = substr(line, 1, RSTART - 1)
+        if (release_declaration_line) {
+          release_open = index(assignment_prefix, "{")
+          if (release_open) assignment_prefix = substr(assignment_prefix, release_open + 1)
+          else assignment_direct = 0
+        }
+        gsub(/[[:space:]]/, "", assignment_prefix)
+        if (signing_assignment_count > 1 || !assignment_direct || assignment_prefix != "") {
+          reference = "unknown"
+        } else reference = classify_reference(trim_assignment(line))
       }
       depth += brace_delta(line)
       if (in_release && depth <= 1) {
-        if (reference != "") print reference
-        exit
+        in_release = 0
       }
-      if (depth <= 0) exit
+      if (depth <= 0) {
+        inside = 0
+        in_release = 0
+        depth = 0
+      }
     }
+    END { if (reference != "") print reference }
+  '
+}
+
+fprs_extract_release_application_id_suffix() {
+  fprs_gradle_without_comments "$gradle_path" | awk '
+    function brace_delta(value, opens, closes, copy) {
+      copy = value
+      opens = gsub(/\{/, "{", copy)
+      copy = value
+      closes = gsub(/\}/, "}", copy)
+      return opens - closes
+    }
+    function assignment_value(value) {
+      if (!match(value, /applicationIdSuffix([[:space:]]+|[[:space:]]*=[[:space:]]*)/)) return ""
+      value = substr(value, RSTART + RLENGTH)
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      while (value ~ /[;}][[:space:]]*$/) {
+        sub(/[;}][[:space:]]*$/, "", value)
+        sub(/[[:space:]]+$/, "", value)
+      }
+      return value
+    }
+    function literal_suffix(value, quote, rest, end) {
+      literal_ok = 0
+      quote = substr(value, 1, 1)
+      if (quote != "\"" && quote != "\047") return ""
+      rest = substr(value, 2)
+      end = index(rest, quote)
+      if (end < 1 || substr(rest, end + 1) != "") return ""
+      value = substr(rest, 1, end - 1)
+      if (value !~ /^\.?[A-Za-z0-9_.-]*$/) return ""
+      literal_ok = 1
+      return value
+    }
+    BEGIN { suffix_status = "absent" }
+    !inside && /buildTypes[[:space:]]*\{/ {
+      inside = 1
+      depth = brace_delta($0)
+      if ($0 ~ /applicationIdSuffix([[:space:]]|=)/) suffix_status = "unresolved"
+      if (depth <= 0) inside = 0
+      next
+    }
+    inside {
+      line = $0
+      release_declaration_line = 0
+      if (depth == 1 &&
+          (line ~ /^[[:space:]]*release[[:space:]]*\{/ ||
+           line ~ /^[[:space:]]*(getByName|named|create|maybeCreate)[[:space:]]*\([[:space:]]*"release"[[:space:]]*\)[[:space:]]*\{/ ||
+           line ~ /^[[:space:]]*(getByName|named|create|maybeCreate)[[:space:]]*\([[:space:]]*\047release\047[[:space:]]*\)[[:space:]]*\{/)) {
+        in_release = 1
+        release_declaration_line = 1
+      }
+      if (in_release && line ~ /applicationIdSuffix([[:space:]]|=)/) {
+        assignment_direct = (depth == 2 || release_declaration_line)
+        match(line, /applicationIdSuffix([[:space:]]+|[[:space:]]*=[[:space:]]*)/)
+        assignment_prefix = substr(line, 1, RSTART - 1)
+        if (release_declaration_line) {
+          release_open = index(assignment_prefix, "{")
+          if (release_open) assignment_prefix = substr(assignment_prefix, release_open + 1)
+          else assignment_direct = 0
+        }
+        gsub(/[[:space:]]/, "", assignment_prefix)
+        if (suffix_status != "absent" || !assignment_direct || assignment_prefix != "") {
+          suffix_status = "unresolved"
+          suffix = ""
+        } else {
+          suffix = literal_suffix(assignment_value(line))
+          if (literal_ok) suffix_status = "resolved"
+          else suffix_status = "unresolved"
+        }
+      }
+      depth += brace_delta(line)
+      if (in_release && depth <= 1) {
+        in_release = 0
+      }
+      if (depth <= 0) {
+        inside = 0
+        in_release = 0
+        depth = 0
+      }
+    }
+    END { print suffix_status "|" suffix }
+  '
+}
+
+fprs_extract_product_flavor_state() {
+  fprs_gradle_without_comments "$gradle_path" | awk '
+    function brace_delta(value, opens, closes, copy) {
+      copy = value
+      opens = gsub(/\{/, "{", copy)
+      copy = value
+      closes = gsub(/\}/, "}", copy)
+      return opens - closes
+    }
+    function static_declaration(value) {
+      return value ~ /^[[:space:]]*(create|maybeCreate)[[:space:]]*\([[:space:]]*["\047][A-Za-z][A-Za-z0-9_-]*["\047][[:space:]]*\)[[:space:]]*\{/ ||
+        value ~ /^[[:space:]]*[A-Za-z][A-Za-z0-9_-]*[[:space:]]*\{/
+    }
+    !inside && /productFlavors[[:space:]]*\{/ {
+      inside = 1
+      present = 1
+      depth = brace_delta($0)
+      opening_remainder = $0
+      sub(/^.*productFlavors[[:space:]]*\{/, "", opening_remainder)
+      gsub(/[[:space:]}]/, "", opening_remainder)
+      if (opening_remainder != "") unresolved++
+      if (depth <= 0) inside = 0
+      next
+    }
+    inside {
+      if (depth == 1 &&
+          (/\{/ || /^[[:space:]]*(create|maybeCreate|register)[[:space:]]*\(/)) {
+        if (static_declaration($0)) resolved++
+        else unresolved++
+      }
+      depth += brace_delta($0)
+      if (depth <= 0) {
+        inside = 0
+        depth = 0
+      }
+    }
+    END {
+      if (present) print "present|" resolved + 0 "|" unresolved + 0
+      else print "absent|0|0"
+    }
+  '
+}
+
+fprs_extract_version_property_source() {
+  local fprs_text fprs_kind
+  fprs_text=$1
+  fprs_kind=$2
+  printf '%s\n' "$fprs_text" | awk -v kind="$fprs_kind" '
+    function assignment_value(value, key) {
+      if (value !~ "^[[:space:]]*" key "([[:space:]]+|[[:space:]]*=[[:space:]]*)") return ""
+      sub("^[[:space:]]*" key "([[:space:]]+|[[:space:]]*=[[:space:]]*)", "", value)
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      while (value ~ /[;}][[:space:]]*$/) {
+        sub(/[;}][[:space:]]*$/, "", value)
+        sub(/[[:space:]]+$/, "", value)
+      }
+      gsub(/[[:space:]]/, "", value)
+      return value
+    }
+    kind == "name" && $0 ~ /^[[:space:]]*versionName([^A-Za-z0-9_]|$)/ {
+      occurrences++
+      value = assignment_value($0, "versionName")
+      if (value ~ /^\(project\.findProperty\(["\047]VERSION_NAME["\047]\)\?:["\047][0-9A-Za-z._+-]+["\047]\)\.toString\(\)$/) {
+        source = "gradle"
+      } else if (value == "flutter.versionName" || value == "flutterVersionName") {
+        source = "flutter"
+      } else invalid = 1
+      next
+    }
+    kind == "code" && $0 ~ /^[[:space:]]*versionCode([^A-Za-z0-9_]|$)/ {
+      occurrences++
+      value = assignment_value($0, "versionCode")
+      if (value ~ /^\(project\.findProperty\(["\047]VERSION_CODE["\047]\)\?:["\047][0-9]+["\047]\)\.toString\(\)\.toInt\(\)$/) {
+        source = "gradle"
+      } else if (value == "flutter.versionCode" || value == "flutterVersionCode" ||
+                 value == "flutterVersionCode.toInteger()") {
+        source = "flutter"
+      } else invalid = 1
+      next
+    }
+    END { if (occurrences == 1 && !invalid && source != "") print source }
   '
 }
 
@@ -478,6 +685,7 @@ fprs_extract_flavor_records() {
     !inside && /productFlavors[[:space:]]*\{/ {
       inside = 1
       depth = brace_delta($0)
+      if (depth <= 0) inside = 0
       next
     }
     inside {
@@ -533,7 +741,10 @@ fprs_extract_flavor_records() {
         override = ""
         override_status = ""
       }
-      if (depth <= 0) exit
+      if (depth <= 0) {
+        inside = 0
+        depth = 0
+      }
     }
   ' | LC_ALL=C sort -t '|' -k1,1 -u
 }
@@ -594,28 +805,129 @@ fprs_extract_firebase_records() {
   fprs_file=$1
   [ -f "$fprs_file" ] || return 0
   awk '
-    function json_value(source, key, value) {
-      value = source
-      sub("^.*\"" key "\"[[:space:]]*:[[:space:]]*\"", "", value)
-      sub(/\".*/, "", value)
-      return value
+    function string_end(source, start, index_value, character, escaped) {
+      escaped = 0
+      for (index_value = start + 1; index_value <= length(source); index_value++) {
+        character = substr(source, index_value, 1)
+        if (escaped) {
+          escaped = 0
+        } else if (character == "\\") {
+          escaped = 1
+        } else if (character == "\"") {
+          return index_value
+        }
+      }
+      return 0
+    }
+    function skip_space(source, start, character) {
+      while (start <= length(source)) {
+        character = substr(source, start, 1)
+        if (character !~ /[[:space:]]/) break
+        start++
+      }
+      return start
+    }
+    function matching_end(source, start, opener, closer, index_value, depth, character, end) {
+      closer = (opener == "{") ? "}" : "]"
+      depth = 0
+      for (index_value = start; index_value <= length(source); index_value++) {
+        character = substr(source, index_value, 1)
+        if (character == "\"") {
+          end = string_end(source, index_value)
+          if (!end) return 0
+          index_value = end
+        } else if (character == opener) {
+          depth++
+        } else if (character == closer) {
+          depth--
+          if (depth == 0) return index_value
+        }
+      }
+      return 0
+    }
+    function direct_container(source, target, opener, index_value, depth, character, end, token, next_value, start, finish) {
+      depth = 0
+      for (index_value = 1; index_value <= length(source); index_value++) {
+        character = substr(source, index_value, 1)
+        if (character == "\"") {
+          end = string_end(source, index_value)
+          if (!end) return ""
+          if (depth == 1) {
+            token = substr(source, index_value + 1, end - index_value - 1)
+            next_value = skip_space(source, end + 1)
+            if (token == target && substr(source, next_value, 1) == ":") {
+              start = skip_space(source, next_value + 1)
+              if (substr(source, start, 1) != opener) return ""
+              finish = matching_end(source, start, opener)
+              if (!finish) return ""
+              return substr(source, start, finish - start + 1)
+            }
+          }
+          index_value = end
+        } else if (character == "{") {
+          depth++
+        } else if (character == "}") {
+          depth--
+        }
+      }
+      return ""
+    }
+    function direct_string(source, target, index_value, depth, character, end, token, next_value, start, finish, value) {
+      depth = 0
+      for (index_value = 1; index_value <= length(source); index_value++) {
+        character = substr(source, index_value, 1)
+        if (character == "\"") {
+          end = string_end(source, index_value)
+          if (!end) return ""
+          if (depth == 1) {
+            token = substr(source, index_value + 1, end - index_value - 1)
+            next_value = skip_space(source, end + 1)
+            if (token == target && substr(source, next_value, 1) == ":") {
+              start = skip_space(source, next_value + 1)
+              if (substr(source, start, 1) != "\"") return ""
+              finish = string_end(source, start)
+              if (!finish) return ""
+              value = substr(source, start + 1, finish - start - 1)
+              if (value ~ /\\/) return ""
+              return value
+            }
+          }
+          index_value = end
+        } else if (character == "{") {
+          depth++
+        } else if (character == "}") {
+          depth--
+        }
+      }
+      return ""
+    }
+    function emit_client(client, client_info, android_info, app_id, package_name) {
+      client_info = direct_container(client, "client_info", "{")
+      if (client_info == "") return
+      android_info = direct_container(client_info, "android_client_info", "{")
+      if (android_info == "") return
+      app_id = direct_string(client_info, "mobilesdk_app_id")
+      package_name = direct_string(android_info, "package_name")
+      if (app_id ~ /^[A-Za-z0-9:._-]+$/ &&
+          package_name ~ /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/) {
+        print package_name "|" app_id
+      }
     }
     { document = document $0 "\n" }
     END {
-      while (match(document, /"(mobilesdk_app_id|package_name)"[[:space:]]*:[[:space:]]*"[^"]*"/)) {
-        token = substr(document, RSTART, RLENGTH)
-        document = substr(document, RSTART + RLENGTH)
-        if (token ~ /^"mobilesdk_app_id"/) {
-          app_id = json_value(token, "mobilesdk_app_id")
-        } else {
-          package_name = json_value(token, "package_name")
-        }
-        if (app_id != "" && package_name != "") {
-          if (app_id ~ /^[A-Za-z0-9:._-]+$/ && package_name ~ /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/) {
-            print package_name "|" app_id
-          }
-          app_id = ""
-          package_name = ""
+      clients = direct_container(document, "client", "[")
+      if (clients == "") exit
+      for (index_value = 2; index_value < length(clients); index_value++) {
+        character = substr(clients, index_value, 1)
+        if (character == "\"") {
+          finish = string_end(clients, index_value)
+          if (!finish) exit
+          index_value = finish
+        } else if (character == "{") {
+          finish = matching_end(clients, index_value, "{")
+          if (!finish) exit
+          emit_client(substr(clients, index_value, finish - index_value + 1))
+          index_value = finish
         }
       }
     }
@@ -1064,24 +1376,28 @@ then
 fi
 
 if [ -n "$gradle_path" ] && [ -z "$version_name" ]; then
-  if printf '%s\n' "$default_config_text" | grep -F 'VERSION_NAME' >/dev/null 2>&1; then
-    version_name=$(fprs_read_property "$project_root/android/gradle.properties" VERSION_NAME)
-  elif printf '%s\n' "$default_config_text" |
-    grep -E 'flutterVersionName|flutter\.versionName' >/dev/null 2>&1
-  then
-    version_name=$(fprs_read_property "$project_root/android/local.properties" flutter.versionName)
-    [ -n "$version_name" ] || version_name=$pubspec_version_name
-  fi
+  version_name_source=$(fprs_extract_version_property_source "$default_config_text" name)
+  case "$version_name_source" in
+    gradle)
+      version_name=$(fprs_read_property "$project_root/android/gradle.properties" VERSION_NAME)
+      ;;
+    flutter)
+      version_name=$(fprs_read_property "$project_root/android/local.properties" flutter.versionName)
+      [ -n "$version_name" ] || version_name=$pubspec_version_name
+      ;;
+  esac
 fi
 if [ -n "$gradle_path" ] && [ -z "$version_code" ]; then
-  if printf '%s\n' "$default_config_text" | grep -F 'VERSION_CODE' >/dev/null 2>&1; then
-    version_code=$(fprs_read_property "$project_root/android/gradle.properties" VERSION_CODE)
-  elif printf '%s\n' "$default_config_text" |
-    grep -E 'flutterVersionCode|flutter\.versionCode' >/dev/null 2>&1
-  then
-    version_code=$(fprs_read_property "$project_root/android/local.properties" flutter.versionCode)
-    [ -n "$version_code" ] || version_code=$pubspec_build_number
-  fi
+  version_code_source=$(fprs_extract_version_property_source "$default_config_text" code)
+  case "$version_code_source" in
+    gradle)
+      version_code=$(fprs_read_property "$project_root/android/gradle.properties" VERSION_CODE)
+      ;;
+    flutter)
+      version_code=$(fprs_read_property "$project_root/android/local.properties" flutter.versionCode)
+      [ -n "$version_code" ] || version_code=$pubspec_build_number
+      ;;
+  esac
 fi
 if [ -n "$version_name" ] && ! printf '%s\n' "$version_name" |
   grep -E '^[0-9A-Za-z][0-9A-Za-z._+-]*$' >/dev/null 2>&1
@@ -1107,6 +1423,18 @@ flavor_records=
 [ -z "$gradle_path" ] || flavor_records=$(fprs_extract_flavor_records)
 flavors=$(printf '%s\n' "$flavor_records" | awk -F '|' 'NF && $1 != "" { print $1 }')
 flavor_count=$(fprs_line_count "$flavors")
+product_flavor_state='absent|0|0'
+[ -z "$gradle_path" ] || product_flavor_state=$(fprs_extract_product_flavor_state)
+product_flavor_state_rest=${product_flavor_state#*|}
+resolved_flavor_declaration_count=${product_flavor_state_rest%%|*}
+unresolved_flavor_declaration_count=${product_flavor_state_rest##*|}
+unresolved_flavor_declarations=false
+if [ "$unresolved_flavor_declaration_count" -gt 0 ] ||
+  [ "$resolved_flavor_declaration_count" -ne "$flavor_count" ]
+then
+  unresolved_flavor_declarations=true
+  fprs_append_warning 'product flavor declarations could not be resolved'
+fi
 flavor_dimension_records=
 [ -z "$gradle_path" ] || flavor_dimension_records=$(fprs_extract_flavor_dimensions)
 flavor_dimensions=$(printf '%s\n' "$flavor_dimension_records" |
@@ -1119,6 +1447,15 @@ if printf '%s\n' "$flavor_dimension_records" | grep -F -x '?' >/dev/null 2>&1; t
 elif [ "$flavor_dimension_count" -gt 1 ]; then
   ambiguous_flavor_dimensions=true
   fprs_append_warning 'multiple flavor dimensions prevent deterministic application ID resolution'
+fi
+
+release_application_id_suffix_record='absent|'
+[ -z "$gradle_path" ] ||
+  release_application_id_suffix_record=$(fprs_extract_release_application_id_suffix)
+release_application_id_suffix_status=${release_application_id_suffix_record%%|*}
+release_application_id_suffix=${release_application_id_suffix_record#*|}
+if [ "$release_application_id_suffix_status" = unresolved ]; then
+  fprs_append_warning 'release application ID suffix expression could not be resolved'
 fi
 
 entrypoints=$(
@@ -1154,7 +1491,12 @@ fi
 application_id_candidates=
 flavor_candidate_records=
 if [ "$flavor_count" -eq 0 ]; then
-  application_id_candidates=$base_application_id
+  if [ "$unresolved_flavor_declarations" = false ] &&
+    [ "$release_application_id_suffix_status" != unresolved ] &&
+    [ -n "$base_application_id" ]
+  then
+    application_id_candidates="$base_application_id$release_application_id_suffix"
+  fi
 else
   candidate_lines=
   while IFS= read -r flavor_record
@@ -1189,10 +1531,15 @@ else
     if [ "$ambiguous_flavor_dimensions" = true ]; then
       flavor_candidate_status=unresolved
     fi
+    if [ "$unresolved_flavor_declarations" = true ] ||
+      [ "$release_application_id_suffix_status" = unresolved ]
+    then
+      flavor_candidate_status=unresolved
+    fi
 
     flavor_candidate=
     if [ "$flavor_candidate_status" = resolved ]; then
-      flavor_candidate="$flavor_candidate_base$flavor_suffix"
+      flavor_candidate="$flavor_candidate_base$flavor_suffix$release_application_id_suffix"
       if [ -z "$candidate_lines" ]; then
         candidate_lines=$flavor_candidate
       else
@@ -1220,7 +1567,6 @@ application_id=
 if [ -n "$requested_flavor" ]; then
   if selected_record=$(fprs_flavor_record "$requested_flavor"); then
     selected_flavor=$requested_flavor
-    [ "$selected_flavor" != "$suggested_flavor" ] || suggestion_confirmed=true
     selected_candidate_record=$(printf '%s\n' "$flavor_candidate_records" |
       awk -F '|' -v target="$requested_flavor" '$1 == target { print; exit }')
     selected_candidate_rest=${selected_candidate_record#*|}

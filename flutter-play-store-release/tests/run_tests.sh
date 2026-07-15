@@ -1134,6 +1134,22 @@ inspection_write_wrapper() {
     "$inspection_gradle_version" > "$inspection_project/android/gradle/wrapper/gradle-wrapper.properties"
 }
 
+inspection_append_execution_canary() {
+  inspection_gradle_file=$1
+  inspection_gradle_dsl=$2
+  case "$inspection_gradle_dsl" in
+    groovy)
+      printf '\nnew File(System.getenv("FPRS_INSPECTION_EXEC_MARKER") ?: "/dev/null").text = "executed"\n' \
+        >> "$inspection_gradle_file"
+      ;;
+    kotlin)
+      printf '\njava.io.File(System.getenv("FPRS_INSPECTION_EXEC_MARKER") ?: "/dev/null").writeText("executed")\n' \
+        >> "$inspection_gradle_file"
+      ;;
+    *) fail 'unknown Gradle DSL for execution canary' ;;
+  esac
+}
+
 inspection_make_groovy() {
   inspection_project=$1
   inspection_write_pubspec "$inspection_project" dev_dependencies
@@ -1234,13 +1250,15 @@ android {
     }
 }
 KOTLIN
+  inspection_append_execution_canary \
+    "$inspection_project/android/app/build.gradle.kts" kotlin
   printf 'void main() {}\n' > "$inspection_project/lib/main_release.dart"
   mkdir -p "$inspection_project/android/fastlane" "$inspection_project/.github/workflows"
   printf 'firebase_app_distribution(app: ENV["FIREBASE_APP_ID"])\n' \
     > "$inspection_project/android/fastlane/Fastfile"
   printf 'name: release\n' > "$inspection_project/.github/workflows/release-android.yml"
   mkdir -p "$inspection_project/android/app/src/release"
-  printf '%s\n' '{"project_info":{"project_number":"FPRS_FIREBASE_PROJECT_CANARY_7364f1","project_id":"not-for-output"},"client":[{"client_info":{"mobilesdk_app_id":"1:123456789:android:releaseabc","android_client_info":{"package_name":"com.acme.mobile.release"}},"api_key":[{"current_key":"FPRS_FIREBASE_API_KEY_CANARY_aa90e2"}]},{"client_info":{"mobilesdk_app_id":"1:123456789:android:legacyabc","android_client_info":{"package_name":"com.acme.legacy"}}}]}' \
+  printf '%s\n' '{"project_info":{"project_number":"FPRS_FIREBASE_PROJECT_CANARY_7364f1","project_id":"not-for-output","package_name":"com.global.noise"},"client":[{"oauth_client":[{"client_type":1,"android_info":{"package_name":"com.oauth.noise"}}],"client_info":{"mobilesdk_app_id":"1:123456789:android:releaseabc","android_client_info":{"package_name":"com.acme.mobile.release"}},"api_key":[{"current_key":"FPRS_FIREBASE_API_KEY_CANARY_aa90e2"}]},{"client_info":{"mobilesdk_app_id":"1:123456789:android:legacyabc","android_client_info":{"package_name":"com.acme.legacy"}}},{"client_info":{"mobilesdk_app_id":"1:123456789:android:orphanabc"}},{"client_info":{"android_client_info":{"package_name":"com.cross.noise"}}}]}' \
     > "$inspection_project/android/app/src/release/google-services.json"
 }
 
@@ -1257,7 +1275,7 @@ KOTLIN
 android {
     namespace = "com.example.kotlin"
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
+        sourceCompatibility = JavaVersion.VERSION_1_8
     }
     defaultConfig {
         applicationId = "com.example.kotlin"
@@ -1266,6 +1284,8 @@ android {
     }
 }
 KOTLIN
+  inspection_append_execution_canary \
+    "$inspection_project/android/app/build.gradle.kts" kotlin
 }
 
 inspection_make_unresolved() {
@@ -1287,6 +1307,41 @@ android {
     }
 }
 GRADLE
+  inspection_append_execution_canary \
+    "$inspection_project/android/app/build.gradle" groovy
+}
+
+inspection_make_dynamic_flavor() {
+  inspection_project=$1
+  inspection_write_pubspec "$inspection_project" dev_dependencies
+  inspection_write_wrapper "$inspection_project" 8.7
+  cat > "$inspection_project/android/settings.gradle.kts" <<'KOTLIN'
+plugins {
+    id("com.android.application") version "8.5.2" apply false
+}
+KOTLIN
+  cat > "$inspection_project/android/app/build.gradle.kts" <<'KOTLIN'
+android {
+    namespace = "com.example.dynamic"
+    defaultConfig {
+        applicationId = "com.example.dynamic"
+        versionCode = 45
+        versionName = "1.2.3"
+    }
+    productFlavors {
+        create("release") {
+            applicationIdSuffix = ".release"
+        }
+    }
+    productFlavors {
+        create(flavorNameFromEnvironment()) {
+            applicationIdSuffix = ".dynamic"
+        }
+    }
+}
+KOTLIN
+  inspection_append_execution_canary \
+    "$inspection_project/android/app/build.gradle.kts" kotlin
 }
 
 inspection_make_dynamic_suffix() {
@@ -1313,6 +1368,8 @@ android {
     }
 }
 GRADLE
+  inspection_append_execution_canary \
+    "$inspection_project/android/app/build.gradle" groovy
   printf 'void main() {}\n' > "$inspection_project/lib/main_release.dart"
 }
 
@@ -1324,6 +1381,185 @@ inspection_make_literal_suffix() {
     > "$inspection_project/android/app/build.gradle.next"
   mv "$inspection_project/android/app/build.gradle.next" \
     "$inspection_project/android/app/build.gradle"
+}
+
+inspection_make_release_suffix() {
+  inspection_project=$1
+  inspection_suffix_expression=$2
+  inspection_write_pubspec "$inspection_project" dev_dependencies
+  inspection_write_wrapper "$inspection_project" 8.7
+  cat > "$inspection_project/android/settings.gradle.kts" <<'KOTLIN'
+plugins {
+    id("com.android.application") version "8.5.2" apply false
+}
+KOTLIN
+  cat > "$inspection_project/android/app/build.gradle.kts" <<KOTLIN
+android {
+    namespace = "com.example.base"
+    defaultConfig {
+        applicationId = "com.example.base"
+        versionCode = 45
+        versionName = "1.2.3"
+    }
+    productFlavors {
+        create("release") {
+            applicationIdSuffix = ".flavor"
+        }
+    }
+    buildTypes {
+        getByName("release") {
+            applicationIdSuffix = $inspection_suffix_expression
+        }
+    }
+}
+KOTLIN
+  inspection_append_execution_canary \
+    "$inspection_project/android/app/build.gradle.kts" kotlin
+  printf 'void main() {}\n' > "$inspection_project/lib/main_release.dart"
+}
+
+inspection_make_release_suffix_without_flavors() {
+  inspection_project=$1
+  inspection_write_pubspec "$inspection_project" dev_dependencies
+  inspection_write_wrapper "$inspection_project" 8.7
+  cat > "$inspection_project/android/settings.gradle.kts" <<'KOTLIN'
+plugins {
+    id("com.android.application") version "8.5.2" apply false
+}
+KOTLIN
+  cat > "$inspection_project/android/app/build.gradle.kts" <<'KOTLIN'
+android {
+    namespace = "com.example.base"
+    defaultConfig {
+        applicationId = "com.example.base"
+        versionCode = 45
+        versionName = "1.2.3"
+    }
+    buildTypes {
+        getByName("release") {
+        }
+    }
+    buildTypes {
+        getByName("release") {
+            applicationIdSuffix = ".store"
+        }
+    }
+}
+KOTLIN
+  inspection_append_execution_canary \
+    "$inspection_project/android/app/build.gradle.kts" kotlin
+}
+
+inspection_make_signing_reference() {
+  inspection_project=$1
+  inspection_signing_expression=$2
+  inspection_write_pubspec "$inspection_project" dev_dependencies
+  inspection_write_wrapper "$inspection_project" 8.7
+  cat > "$inspection_project/android/settings.gradle.kts" <<'KOTLIN'
+plugins {
+    id("com.android.application") version "8.5.2" apply false
+}
+KOTLIN
+  cat > "$inspection_project/android/app/build.gradle.kts" <<KOTLIN
+android {
+    namespace = "com.example.signing"
+    defaultConfig {
+        applicationId = "com.example.signing"
+        versionCode = 45
+        versionName = "1.2.3"
+    }
+    buildTypes {
+        named("release") {
+            signingConfig = $inspection_signing_expression
+        }
+    }
+}
+KOTLIN
+  inspection_append_execution_canary \
+    "$inspection_project/android/app/build.gradle.kts" kotlin
+}
+
+inspection_make_nested_release_assignments() {
+  inspection_project=$1
+  inspection_write_pubspec "$inspection_project" dev_dependencies
+  inspection_write_wrapper "$inspection_project" 8.7
+  cat > "$inspection_project/android/settings.gradle.kts" <<'KOTLIN'
+plugins {
+    id("com.android.application") version "8.5.2" apply false
+}
+KOTLIN
+  cat > "$inspection_project/android/app/build.gradle.kts" <<'KOTLIN'
+android {
+    namespace = "com.example.nested"
+    defaultConfig {
+        applicationId = "com.example.nested"
+        versionCode = 45
+        versionName = "1.2.3"
+    }
+    buildTypes {
+        named("release") {
+            if (enableConditionalRelease) {
+                applicationIdSuffix = ".conditional"
+                signingConfig = signingConfigs.named("debug").get()
+            }
+        }
+    }
+}
+KOTLIN
+  inspection_append_execution_canary \
+    "$inspection_project/android/app/build.gradle.kts" kotlin
+}
+
+inspection_make_mixed_versions() {
+  inspection_project=$1
+  inspection_write_pubspec "$inspection_project" dev_dependencies
+  inspection_write_wrapper "$inspection_project" 8.7
+  printf 'VERSION_NAME=7.4.0\nVERSION_CODE=740\n' \
+    > "$inspection_project/android/gradle.properties"
+  cat > "$inspection_project/android/settings.gradle.kts" <<'KOTLIN'
+plugins {
+    id("com.android.application") version "8.5.2" apply false
+}
+KOTLIN
+  cat > "$inspection_project/android/app/build.gradle.kts" <<'KOTLIN'
+android {
+    namespace = "com.example.versions"
+    defaultConfig {
+        applicationId = "com.example.versions"
+        versionCode = (project.findProperty("VERSION_CODE") ?: "1").toString().toInt() + calculateOffset()
+        versionName = (project.findProperty("VERSION_NAME") ?: "1.0").toString() + versionSuffix()
+    }
+}
+KOTLIN
+  inspection_append_execution_canary \
+    "$inspection_project/android/app/build.gradle.kts" kotlin
+}
+
+inspection_make_version_mutations() {
+  inspection_project=$1
+  inspection_write_pubspec "$inspection_project" dev_dependencies
+  inspection_write_wrapper "$inspection_project" 8.7
+  printf 'VERSION_NAME=7.4.0\nVERSION_CODE=740\n' \
+    > "$inspection_project/android/gradle.properties"
+  cat > "$inspection_project/android/settings.gradle.kts" <<'KOTLIN'
+plugins {
+    id("com.android.application") version "8.5.2" apply false
+}
+KOTLIN
+  cat > "$inspection_project/android/app/build.gradle.kts" <<'KOTLIN'
+android {
+    namespace = "com.example.mutations"
+    defaultConfig {
+        applicationId = "com.example.mutations"
+        versionCode = (project.findProperty("VERSION_CODE") ?: "1").toString().toInt()
+        versionCode += calculateOffset()
+        versionName = (project.findProperty("VERSION_NAME") ?: "1.0").toString()
+        versionName += versionSuffix()
+    }
+}
+KOTLIN
+  inspection_append_execution_canary \
+    "$inspection_project/android/app/build.gradle.kts" kotlin
 }
 
 inspection_make_multidimension() {
@@ -1356,6 +1592,8 @@ android {
     }
 }
 GRADLE
+  inspection_append_execution_canary \
+    "$inspection_project/android/app/build.gradle" groovy
 }
 
 inspection_assert_no_canary_logs() {
@@ -1382,9 +1620,9 @@ inspection() {
   groovy_project=$(CDPATH= cd -- "$groovy_project" && pwd -P) ||
     fail 'could not resolve Groovy fixture physically'
   exec_marker="$INSPECTION_ROOT/project-command-executed"
+  export FPRS_INSPECTION_EXEC_MARKER="$exec_marker"
 
   inspection_assert_status 'minimal Groovy JSON inspection failed' 0 \
-    env FPRS_INSPECTION_EXEC_MARKER="$exec_marker" \
     "$INSPECTOR" --project "$groovy_project" --format json
   inspection_assert_schema "$INSPECTION_LAST_STDOUT"
   assert_empty_file "$INSPECTION_LAST_STDERR" 'successful JSON inspection wrote diagnostics to stderr'
@@ -1458,7 +1696,7 @@ EOF
     "$INSPECTOR" --project "$minimal_kotlin_project" --format json
   inspection_assert_schema "$INSPECTION_LAST_STDOUT"
   inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
-    '"android_dsl":"kotlin","gradle_file":"android/app/build.gradle.kts","android_gradle_plugin_version":"8.6.1","gradle_wrapper_version":"8.9","java_compatibility":"17"' \
+    '"android_dsl":"kotlin","gradle_file":"android/app/build.gradle.kts","android_gradle_plugin_version":"8.6.1","gradle_wrapper_version":"8.9","java_compatibility":"8"' \
     'minimal Kotlin Gradle fields changed'
   inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
     '"application_id":"com.example.kotlin","namespace":"com.example.kotlin","application_id_candidates":["com.example.kotlin"]' \
@@ -1499,7 +1737,7 @@ EOF
     '"android_gradle_plugin_version":"8.7.3","gradle_wrapper_version":"8.10.2","java_compatibility":"21"' \
     '"application_id":"com.acme.mobile.release","namespace":"com.acme.shell"' \
     '"version_name":"7.4.0","version_code":"740","pubspec_version_name":"3.0.0","pubspec_build_number":"300"' \
-    '"selected_flavor":"release","suggested_flavor":"release","suggestion_confirmed":true' \
+    '"selected_flavor":"release","suggested_flavor":"release","suggestion_confirmed":false' \
     '"entrypoints":["lib/main.dart","lib/main_release.dart"],"build_runner":true' \
     '"fastlane":true,"github_actions":true,"release_signing":false,"release_uses_debug_signing":true,"firebase":true' \
     '"firebase_package_names":["com.acme.mobile.release","com.acme.legacy"]' \
@@ -1511,6 +1749,21 @@ EOF
     inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" "$inspection_fragment" \
       "selected Kotlin inspection missing: $inspection_fragment"
   done
+  if grep -E 'com\.(oauth|global|cross)\.noise' "$INSPECTION_LAST_STDOUT" >/dev/null 2>&1; then
+    fail 'Firebase inspection paired an app ID with a package outside client_info.android_client_info'
+  fi
+
+  dynamic_flavor_project="$INSPECTION_ROOT/dynamic flavor declaration app"
+  inspection_make_dynamic_flavor "$dynamic_flavor_project"
+  inspection_assert_status 'dynamic product flavor declaration inspection failed' 0 \
+    "$INSPECTOR" --project "$dynamic_flavor_project" --format json
+  inspection_assert_schema "$INSPECTION_LAST_STDOUT"
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"application_id":null,"namespace":"com.example.dynamic","application_id_candidates":[]' \
+    'dynamic product flavor declaration fell back to the base application ID'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"warnings":["product flavor declarations could not be resolved"]' \
+    'dynamic product flavor declaration warning changed'
 
   dynamic_suffix_project="$INSPECTION_ROOT/dynamic suffix app"
   inspection_make_dynamic_suffix "$dynamic_suffix_project"
@@ -1534,6 +1787,106 @@ EOF
   inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
     '"warnings":[],"failures":[]' \
     'normal namespace/base identity produced a flavor suffix mismatch warning'
+
+  release_suffix_project="$INSPECTION_ROOT/release build suffix app"
+  inspection_make_release_suffix "$release_suffix_project" '".store"'
+  inspection_assert_status 'literal release build suffix inspection failed' 0 \
+    "$INSPECTOR" --project "$release_suffix_project" --format json --flavor release
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"application_id":"com.example.base.flavor.store","namespace":"com.example.base","application_id_candidates":["com.example.base.flavor.store"]' \
+    'release build suffix was not appended after the flavor suffix'
+
+  no_flavor_release_suffix_project="$INSPECTION_ROOT/no-flavor release build suffix app"
+  inspection_make_release_suffix_without_flavors "$no_flavor_release_suffix_project"
+  inspection_assert_status 'no-flavor release build suffix inspection failed' 0 \
+    "$INSPECTOR" --project "$no_flavor_release_suffix_project" --format json
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"application_id":"com.example.base.store","namespace":"com.example.base","application_id_candidates":["com.example.base.store"]' \
+    'release build suffix was not applied without product flavors'
+
+  dynamic_release_suffix_project="$INSPECTION_ROOT/dynamic release build suffix app"
+  inspection_make_release_suffix "$dynamic_release_suffix_project" \
+    '".store" + suffixFromEnvironment()'
+  inspection_assert_status 'dynamic release build suffix inspection failed' 0 \
+    "$INSPECTOR" --project "$dynamic_release_suffix_project" --format json --flavor release
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"application_id":null,"namespace":"com.example.base","application_id_candidates":[]' \
+    'dynamic release build suffix produced a concrete application ID'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"warnings":["release application ID suffix expression could not be resolved"]' \
+    'dynamic release build suffix warning changed'
+
+  named_debug_signing_project="$INSPECTION_ROOT/named debug signing app"
+  inspection_make_signing_reference "$named_debug_signing_project" \
+    'signingConfigs.named("debug").get()'
+  inspection_assert_status 'Kotlin named debug signing inspection failed' 0 \
+    "$INSPECTOR" --project "$named_debug_signing_project" --format json
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"release_signing":false,"release_uses_debug_signing":true' \
+    'Kotlin named debug signing was not classified as debug signing'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"warnings":["release build type uses debug signing"]' \
+    'Kotlin named debug signing warning changed'
+
+  named_upload_signing_project="$INSPECTION_ROOT/named upload signing app"
+  inspection_make_signing_reference "$named_upload_signing_project" \
+    'signingConfigs.named("upload").get()'
+  inspection_assert_status 'Kotlin named upload signing inspection failed' 0 \
+    "$INSPECTOR" --project "$named_upload_signing_project" --format json
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"release_signing":true,"release_uses_debug_signing":false' \
+    'Kotlin named upload signing was not classified as non-debug signing'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"warnings":[],"failures":[]' \
+    'Kotlin named upload signing emitted a warning'
+
+  conditional_signing_project="$INSPECTION_ROOT/conditional signing app"
+  inspection_make_signing_reference "$conditional_signing_project" \
+    'if (useDebugSigning) signingConfigs.debug else signingConfigs.upload'
+  inspection_assert_status 'conditional release signing inspection failed' 0 \
+    "$INSPECTOR" --project "$conditional_signing_project" --format json
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"release_signing":false,"release_uses_debug_signing":false' \
+    'conditional release signing expression was classified as a direct reference'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"warnings":["release signing expression could not be resolved"]' \
+    'conditional release signing warning changed'
+
+  nested_release_project="$INSPECTION_ROOT/nested conditional release assignments app"
+  inspection_make_nested_release_assignments "$nested_release_project"
+  inspection_assert_status 'nested conditional release assignment inspection failed' 0 \
+    "$INSPECTOR" --project "$nested_release_project" --format json
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"application_id":null,"namespace":"com.example.nested","application_id_candidates":[]' \
+    'nested release suffix assignment produced a concrete application ID'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"release_signing":false,"release_uses_debug_signing":false' \
+    'nested release signing assignment was classified as direct'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"warnings":["release application ID suffix expression could not be resolved","release signing expression could not be resolved"]' \
+    'nested conditional release warnings changed'
+
+  mixed_versions_project="$INSPECTION_ROOT/mixed version expressions app"
+  inspection_make_mixed_versions "$mixed_versions_project"
+  inspection_assert_status 'mixed version property expression inspection failed' 0 \
+    "$INSPECTOR" --project "$mixed_versions_project" --format json
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"version_name":null,"version_code":null' \
+    'mixed version expressions were collapsed to property values'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"warnings":["version code expression could not be resolved","version name expression could not be resolved"]' \
+    'mixed version expression warnings changed'
+
+  version_mutations_project="$INSPECTION_ROOT/version property mutations app"
+  inspection_make_version_mutations "$version_mutations_project"
+  inspection_assert_status 'version property mutation inspection failed' 0 \
+    "$INSPECTOR" --project "$version_mutations_project" --format json
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"version_name":null,"version_code":null' \
+    'later version mutations did not invalidate allowlisted property assignments'
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"warnings":["version code expression could not be resolved","version name expression could not be resolved"]' \
+    'version mutation warnings changed'
 
   multidimension_project="$INSPECTION_ROOT/multiple flavor dimensions app"
   inspection_make_multidimension "$multidimension_project"
@@ -1577,6 +1930,13 @@ SH
     env PATH="$INSPECTION_ROOT/no dependency tools:$PATH" \
     "$INSPECTOR" --project "$groovy_project" --format json
   inspection_assert_schema "$INSPECTION_LAST_STDOUT"
+  inspection_assert_status 'Firebase inspection required a forbidden JSON dependency' 0 \
+    env PATH="$INSPECTION_ROOT/no dependency tools:$PATH" \
+    "$INSPECTOR" --project "$kotlin_project" --format json --flavor release
+  inspection_assert_schema "$INSPECTION_LAST_STDOUT"
+  inspection_assert_json_fragment "$INSPECTION_LAST_STDOUT" \
+    '"firebase_package_names":["com.acme.mobile.release","com.acme.legacy"]' \
+    'dependency-free Firebase inspection changed scoped client mappings'
 
   unresolved_project="$INSPECTION_ROOT/unresolved expressions"
   inspection_make_unresolved "$unresolved_project"
@@ -1605,6 +1965,7 @@ SH
   git -C "$dirty_project" init -q || fail 'could not initialize Git fixture'
   git -C "$dirty_project" add . || fail 'could not stage Git fixture'
   git -C "$dirty_project" -c user.name=Fixture -c user.email=fixture@example.invalid \
+    -c commit.gpgSign=false \
     commit -qm initial || fail 'could not commit Git fixture'
   printf '# dirty\n' >> "$dirty_project/pubspec.yaml"
   inspection_assert_status 'dirty Git inspection failed' 0 \

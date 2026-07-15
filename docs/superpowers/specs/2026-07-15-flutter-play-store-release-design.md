@@ -36,16 +36,23 @@ flutter-play-store-release/
 ├── update.sh
 ├── uninstall.sh
 ├── scripts/
+│   ├── lib/
+│   │   ├── common.sh
+│   │   ├── package_sync.sh
+│   │   ├── project_transaction.sh
+│   │   └── gradle_signing.sh
 │   ├── inspect_flutter_project.sh
 │   ├── bootstrap_android_fastlane.sh
 │   ├── validate_release_setup.sh
 │   ├── encode_secret.sh
-│   └── decode_secret.sh
+│   ├── decode_secret.sh
+│   └── install_flutter_sdk.sh
 ├── templates/
 │   ├── Gemfile
 │   ├── Gemfile.lock
 │   ├── Appfile
 │   ├── Fastfile
+│   ├── FlutterPlayStoreRelease.rb
 │   ├── Pluginfile
 │   ├── env.example
 │   ├── key.properties.example
@@ -58,6 +65,7 @@ flutter-play-store-release/
 │   └── first-release-checklist.md
 └── tests/
     ├── run_tests.sh
+    ├── fastlane_helper_test.rb
     └── fixtures/ generated at test runtime
 ```
 
@@ -67,15 +75,17 @@ The scripts target macOS and Linux, remain compatible with the system Bash avail
 
 ## Installation model
 
-Use copies rather than symlinks for maximum compatibility. `.skill-package-id` contains the fixed package ID and schema version. `install-manifest.txt` lists every runtime file that must be copied; canonical-only fixture tests and generated artifacts are outside that manifest. Both installed destinations must be byte-for-byte identical, and every installed manifest entry must match its canonical source.
+Use copies rather than symlinks for maximum compatibility. `.skill-package-id` contains the fixed package ID and schema version. `install-manifest.txt` lists every runtime file that must be copied; canonical-only fixture tests and generated artifacts are outside that manifest. Each installed copy has a deterministic `.skill-install-receipt` recording the hash and mode of every manifest entry. Both installed destinations, including receipts, must be byte-for-byte identical, and every installed manifest entry must match its canonical source.
 
 - `install.sh` uses its own containing directory as the canonical source, copies the manifest into both global destinations, and refuses unsafe source/destination relationships or invalid required files.
 - `update.sh` requires an explicit canonical source or a non-installed script location, performs the same validated synchronization, and refuses to treat either global destination as canonical.
 - `uninstall.sh` removes only destinations that identify themselves as this package; support `--dry-run` and require an explicit confirmation flag for non-interactive removal.
 - Exclude canonical-only tests, test artifacts, VCS metadata, caches, and local secrets from the install manifest.
-- Resolve and validate paths; mutate only the two exact global destinations; refuse destination symlinks, source/destination overlap, and unrelated existing directories.
-- Stage and validate both copies before replacing either. Retain rollback copies until both atomic swaps succeed; if either swap fails, restore both previous installations.
-- Never uninstall the canonical source. Tests inject a failure during the second swap and prove both prior copies remain unchanged.
+- Resolve and validate paths; mutate only the two exact global destinations, transaction-specific siblings inside their parents, and `$HOME/.flutter-play-store-release-install-state/` for the shared lock/journal. Refuse destination symlinks, source/destination overlap, unrelated directories, or identity-valid installations with an edited/missing manifest entry or any unexpected file, directory, or symlink. Remove clean support state after success.
+- Serialize install/update/uninstall with one shared atomic lock at `$HOME/.flutter-play-store-release-install-state/lock` inside a non-symlink mode-`0700` current-user state directory; its owner token prevents another process from removing it. Reclaim a same-host stale lock only after proving the recorded process is absent.
+- Stage and validate both copies before replacing either. Persist an atomic phase journal with validated `package_id`, schema, `transaction_id`, operation, phase, prior-existence flags, and per-destination stage/rollback/quarantine paths; never source it as shell code. Retain rollback copies until both swaps/final validation succeed, then record `committed` before cleanup. Catchable pre-commit failures restore immediately; the next locked invocation restores old state for pre-commit journals, preserves new state and finishes cleanup for committed journals, or reports retained rollback paths when validation fails. Journal paths must match exact transaction-specific basenames beneath the two destination parents before any rename/delete.
+- Treat successful uninstall renames plus an atomic committed journal as the commit point. Failures before that restore both; a committed-journal recovery preserves absent destinations and finishes quarantine cleanup. Post-commit deletion is best effort, and undeleted paths/journal evidence are retained and reported rather than falsely claiming rollback.
+- Never uninstall the canonical source. Tests inject failures at every install/uninstall phase, kill a test process between swaps, and prove recovery preserves the exact prior states.
 
 ## Agent workflow and modes
 
@@ -120,6 +130,7 @@ Support `--project`, human-readable output, and machine-readable JSON. Detect wi
 - current Gradle `versionName` and `versionCode`, the `pubspec.yaml` version name/build number, and relevant Gradle overrides;
 - build_runner presence;
 - Fastlane, GitHub Actions, release signing, Firebase, Firebase App Distribution, flavors, entrypoints, and monorepo indicators;
+- Firebase package/app-ID mappings from `google-services.json` without printing unrelated values;
 - dirty Git state and files that the bootstrap may change.
 
 Do not select a flavor silently. Rank a suggested default only when evidence such as an existing release flavor, entrypoint, CI workflow, or documented convention supports it, and label that suggestion as unconfirmed. When the release application ID cannot be resolved statically, return candidates, place `CHANGE_ME_APPLICATION_ID` only in example configuration, block active build/deploy configuration from using it, and request only the missing flavor/package selection. Always compare `APP_PACKAGE_NAME` with the resolved release `applicationId` before upload.
@@ -136,10 +147,14 @@ android/Gemfile.lock
 android/fastlane/Appfile
 android/fastlane/Fastfile
 android/fastlane/Pluginfile
+android/fastlane/lib/flutter_play_store_release.rb
 android/fastlane/.env.example
 android/key.properties.example
 .github/workflows/release-android.yml
 docs/PLAY_STORE_RELEASE.md
+tool/flutter-play-store-release/decode_secret.sh
+tool/flutter-play-store-release/install_flutter_sdk.sh
+tool/flutter-play-store-release/managed-files.sha256
 .gitignore
 android/app/build.gradle or android/app/build.gradle.kts
 ```
@@ -152,16 +167,16 @@ Safety requirements:
 - Merge missing `.gitignore` lines without duplicates.
 - Use deterministic begin/end markers for generated Gradle and Fastlane blocks.
 - Refuse ambiguous or malformed existing marker regions.
-- Preserve existing lanes and plugins, or stop with a conflict report when safe merging is not possible. Append a marked platform block only when required lane names do not already exist.
+- Preserve existing lanes and plugins, or stop with a conflict report when safe merging is not possible. Append a marked platform block only when required lane names do not already exist. An existing `android/Gemfile` must contain or safely receive exact `gem "fastlane", "= 2.237.0"` plus one compatible `eval_gemfile` import for `android/fastlane/Pluginfile`; conflicting Fastlane constraints and ambiguous/dynamic/duplicate imports are conflicts.
 - Treat an absent file, a recognized package-owned file, a safely mergeable file, and an unowned non-mergeable file as four distinct cases. Update package-owned content, merge only supported structures, and stop before overwriting unowned workflows or customized configuration.
 - Show a diff or dry-run summary before broad changes.
 - Compute and stage every proposed edit before touching the project, validate staged output, then apply as one transaction. Preserve byte-for-byte recovery copies, permissions, and line endings until post-write validation succeeds; restore every changed, removed, dirty, or untracked file if any write fails. A conflict exits nonzero with zero project changes.
-- `--dry-run` performs zero writes and prints a deterministic plan. Whole generated files carry package identity, schema version, and generated-content hash; user-edited package-owned content causes a conflict instead of being overwritten.
+- `--dry-run` performs zero writes and prints a deterministic plan. `tool/flutter-play-store-release/managed-files.sha256` is the authoritative identity/schema/body-hash sidecar for whole generated files; comment-capable files may duplicate that metadata in-file, while tool-owned formats such as `Gemfile.lock` never receive an invalid embedded header. User-edited package-owned content causes a conflict instead of being overwritten.
 - Running bootstrap twice must produce no second-run diff.
 
 ## Android signing
 
-Support Groovy and Kotlin DSL with a generated, marked signing block that reads `android/key.properties` and connects `storeFile`, `storePassword`, `keyAlias`, and `keyPassword` to the release build.
+Support Groovy and Kotlin DSL with a generated, marked signing block that reads `ANDROID_KEY_PROPERTIES_PATH` when set and otherwise `android/key.properties`, then connects `storeFile`, `storePassword`, `keyAlias`, and `keyPassword` to the release build.
 
 - Detect every release-to-debug signing assignment. Safely replace recognized stock Flutter patterns; fail setup and validation with a precise conflict for custom or ambiguous patterns until repaired. A release build must never retain both debug and release signing assignments.
 - Never silently fall back to the debug key.
@@ -169,6 +184,7 @@ Support Groovy and Kotlin DSL with a generated, marked signing block that reads 
 - Preserve user-owned signing code and report conflicts rather than attempting a risky rewrite.
 - Generate placeholders only in `android/key.properties.example`.
 - Add real key properties, keystores, and service-account files to `.gitignore` without ignoring examples.
+- With local environment/path signing inputs, the coordinator creates a mode-`0600` properties file under its owned temporary root, points it at the absolute explicit/decoded keystore, and passes only its nonsecret path. Without those inputs, local execution may use a valid user-owned `android/key.properties` fallback and never deletes it. CI always uses the temporary override and refuses a pre-existing workspace copy. Writers correctly escape Java-properties metacharacters/Unicode, reject controls/newlines, and clean only generated files.
 
 ## Fastlane implementation
 
@@ -178,12 +194,12 @@ Provide lanes:
 
 - `doctor`: report `PASS`, `WARN`, and `FAIL` for toolchain, files, package name, credentials by presence only, signing inputs, track, build_runner, and plugins. Missing deploy credentials are warnings in setup/build context and failures in deploy context; warnings alone exit zero, while any failure exits nonzero.
 - `prepare`: run `flutter pub get`; run `dart run build_runner build --delete-conflicting-outputs` only when `build_runner` appears in dependencies or dev dependencies and `RUN_BUILD_RUNNER` is not false; optionally run analyze/tests according to environment flags.
-- `build`: resolve version/flavor/entrypoint and create a release AAB without uploading; check the standard `build/app/outputs/bundle/release/app-release.aab` and discover the actual flavor-specific output.
-- `release_play_store`: validate inputs, run deploy-context doctor before network access, prepare temporary secrets, run prepare, resolve version name/code, build and verify a nonempty AAB, upload through Fastlane's official Google Play action, report the result, and clean generated secrets in `ensure`.
-- `firebase_distribution`: run only when enabled and selected by `DISTRIBUTION_TARGET`; keep it off by default and add the official plugin only to a package-owned or safely mergeable `Pluginfile`, otherwise provide the exact install step.
-- an internal coordinator used by CI: `play-store` uploads only to Play, `firebase` uploads only to Firebase, and `both` builds once then performs the two explicit uploads in documented order. A second-destination failure after the first succeeds reports `PARTIAL_SUCCESS` and never claims rollback.
+- `build`: resolve version/flavor/entrypoint and create a release AAB without uploading; check the currently documented `build/app/outputs/bundle/release/app.aab` and discover the actual flavor-specific output instead of assuming one filename.
+- `release_play_store`: validate inputs, run deploy-context doctor before network access, prepare temporary secrets, run prepare, resolve version name/code, build and verify a nonempty AAB, and call `upload_to_play_store` with `aab` plus `skip_upload_metadata`, `skip_upload_changelogs`, `skip_upload_images`, and `skip_upload_screenshots` all true. It reports the result and cleans generated secrets in `ensure`.
+- `firebase_distribution`: publicly delegate to the common `release` router with target `firebase`, so it receives deploy doctor, Firebase-only credentials/versioning, package-name validation, APK/AAB build, and shared cleanup. It passes required `app`, artifact type/path, separate credentials, notes, testers, and groups. Firebase-only supports `AAB` or `APK`; `both` requires `AAB` and reuses the Play artifact.
+- a public `release` coordinator used by CI: run doctor, target-specific credential preparation, prepare, version resolution, and one build before private upload-only helpers. `play-store` requires only Play credentials, `firebase` only Firebase credentials, and `both` both independently. `release_play_store` and `firebase_distribution` delegate with fixed targets and never rebuild. A Firebase failure after successful Play upload reports one `PARTIAL_SUCCESS`, never claims rollback, cleans up, and exits nonzero.
 
-Handle Slack notification in success/error paths without allowing notification failure to mask the original result. Assign one notification owner per execution so GitHub Actions and Fastlane do not send duplicates. Never log full environment variables or secret values.
+Handle Slack notification in success/error paths without allowing notification failure to mask the original result. Local runs default to Fastlane ownership; CI assigns GitHub Actions ownership so pre-Fastlane failures are covered without duplicates. When `RELEASE_RESULT_PATH` is supplied, atomically write nonsecret schema-1 result fields (status/target/version/track/artifact/successful and failed destinations/redacted message) before returning or raising; CI uses it for summary/notification and treats absence as a pre-Fastlane failure. Never log full environment variables, credential paths, or secret values.
 
 Document and test the standard Bundler sequence:
 
@@ -195,7 +211,7 @@ bundle exec fastlane android build
 bundle exec fastlane android release_play_store
 ```
 
-Pin Fastlane and plugin dependencies exactly and generate `android/Gemfile.lock`. CI uses frozen/deployment Bundler mode and fails if the lockfile and Gemfile disagree. If a lockfile cannot be generated in the implementation environment, report reproducible dependency verification as incomplete.
+Pin Fastlane `2.237.0` and Firebase plugin `1.0.0`, generate `android/Gemfile.lock` with the verified Bundler `4.0.16` baseline, and re-check all three stable releases at implementation time. CI sets both `BUNDLE_FROZEN=true` and `BUNDLE_DEPLOYMENT=true` and fails if the lockfile and Gemfile disagree. If a lockfile cannot be generated in the implementation environment, report reproducible dependency verification as incomplete.
 
 ## Versioning
 
@@ -215,28 +231,29 @@ Resolve local version name in this order:
 3. current Git tag;
 4. `pubspec.yaml` version name.
 
-Normalize and validate every version-name source, not only release tags. A current Git tag means an exact tag on `HEAD`, never a nearest historical tag.
+Normalize and validate every version-name source, not only release tags. A current Git tag means an exact tag on `HEAD`, never a nearest historical tag. Multiple exact tags are allowed only when all supported tags normalize to the same version (for example `v1.2.3` and `1.2.3`); distinct versions or a mixed valid/invalid exact-tag set fail as ambiguous.
 
-For Play deployment, query the selected target plus `PLAY_STORE_VERSION_TRACKS`, whose documented defaults cover `internal,alpha,beta,production`; allow explicit custom closed-testing tracks. Failure to query any configured track is fatal. Choose the maximum remote code plus one, validate the official numeric range, and never reuse a remote code or fall back locally during deployment. Because Play version codes are app-global, CI serializes all Play uploads for a repository regardless of version, ref, or track, and local concurrent uploads are unsupported.
+For `play-store`/`both`, query the selected target plus `PLAY_STORE_VERSION_TRACKS`, whose documented defaults cover `internal,alpha,beta,production`; allow explicit custom closed-testing tracks. A successful empty track is valid; an API/action error or invalid result for any configured track is fatal. All tracks empty fails with the first-release/manual-bootstrap checklist. Choose the maximum active-track code plus one, validate the official `1..2100000000` range, and never fall back locally during Play deployment. Google and Fastlane expose no authoritative allocator for the highest code ever used, so document this limit, serialize uploads, and surface a Play reuse rejection with retry guidance. Local concurrent uploads are unsupported.
 
-For local build-only mode without API access, use `VERSION_CODE`, then the pubspec build number, then a deterministic positive value derived from the Git commit count. Validate every source as a positive bounded integer. Do not use a Unix timestamp.
+For Firebase-only and local build-only modes without Play API access, use `VERSION_CODE`, then the pubspec build number, then a deterministic positive value derived from the Git commit count. Validate every source as a positive bounded integer. Never query Play for Firebase-only and do not use a Unix timestamp.
 
-Pass explicit `--build-name` and `--build-number` to `flutter build appbundle`, plus detected/selected flavor and target.
+Pass explicit `--build-name` and `--build-number` to Flutter, plus detected/selected flavor and target. Play builds an AAB. Firebase-only may build AAB or APK according to `FIREBASE_ANDROID_ARTIFACT_TYPE`; `both` requires AAB and reuses one build.
 
-Record build start and prior output state. Accept exactly one newly produced AAB matching the selected flavor and target, and fail on zero, multiple, unchanged, or stale candidates. Pass that exact artifact path to the uploader.
+Move only relevant prior variant outputs to a private quarantine before the build. Artifact acceptance is the commit point: restore prior outputs after every command, signal, zero/empty/multiple/mismatch, or other pre-acceptance failure; only after one new artifact passes all checks remove the quarantine. Verify the requested Dart target from the build command itself because the output path cannot encode it. Pass that exact artifact path to the uploader.
 
 ## Credentials and environment
 
-Required deployment inputs:
+Required signing/application inputs for CI deployments, or the environment/path alternative for local deployments:
 
 ```text
 APP_PACKAGE_NAME
-GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64 or GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_PATH
 ANDROID_KEYSTORE_BASE64 or ANDROID_KEYSTORE_PATH
 ANDROID_KEYSTORE_PASSWORD
 ANDROID_KEY_ALIAS
 ANDROID_KEY_PASSWORD
 ```
+
+Local release may replace the four keystore/signing environment inputs with a complete valid user-owned `android/key.properties`; CI always requires the five listed signing/application secrets. Play targets additionally require `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64` or `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_PATH`. Firebase targets additionally require `FIREBASE_APP_ID` and separate `FIREBASE_SERVICE_ACCOUNT_JSON_BASE64` or `FIREBASE_SERVICE_ACCOUNT_JSON_PATH`. `both` requires both target credential sets independently.
 
 Precedence is explicit path, then Base64 value, then documented default path. Never print values.
 
@@ -249,6 +266,7 @@ PLAY_STORE_RELEASE_STATUS=completed
 PLAY_STORE_ROLLOUT=1.0
 CONFIRM_PRODUCTION_DEPLOY=false
 FLUTTER_CHANNEL=stable
+FLUTTER_VERSION=
 JAVA_VERSION=17
 RUBY_VERSION=3.3
 RUN_FLUTTER_ANALYZE=true
@@ -256,16 +274,24 @@ RUN_FLUTTER_TESTS=false
 RUN_BUILD_RUNNER=auto
 DISTRIBUTION_TARGET=play-store
 ENABLE_FIREBASE_APP_DISTRIBUTION=false
+FIREBASE_ANDROID_ARTIFACT_TYPE=AAB
+CONFIRM_FIREBASE_AAB_PLAY_LINKED=false
+CONFIRM_FIREBASE_PACKAGE_MATCH=false
 ```
 
 Optional Firebase inputs are `FIREBASE_APP_ID`, `FIREBASE_TESTER_GROUPS`, `FIREBASE_TESTERS`, and `FIREBASE_RELEASE_NOTES`. Optional Slack inputs are `SLACK_WEBHOOK_URL`, `SLACK_NOTIFY_SUCCESS=true`, and `SLACK_NOTIFY_FAILURE=true`. Document Base64 as transport encoding, not encryption.
 
-Map the Google Play action parameters explicitly from validated values: `track`, `release_status`, `rollout`, `package_name`, service-account JSON path, and resolved AAB path. Validate the track/release-status allowlists, rollout bounds, and valid status/rollout combinations. `production` is never a default and requires `CONFIRM_PRODUCTION_DEPLOY=true`; CI additionally requires a protected GitHub Environment.
+`FLUTTER_VERSION` is required when no `.fvmrc`, `.flutter-version`, or FVM project pin provides an exact version. CI precedence is validated manual `flutter_version`, project pin, repository variable `FLUTTER_VERSION`, then failure. `ANDROID_KEY_PROPERTIES_PATH` is a nonsecret per-process override generated by the coordinator and falls back to `android/key.properties` for user-owned local configuration.
+
+Firebase credentials use separate conditional `FIREBASE_SERVICE_ACCOUNT_JSON_PATH` or `FIREBASE_SERVICE_ACCOUNT_JSON_BASE64` inputs. Do not assume the Google Play Publisher service account has Firebase App Distribution permissions.
+
+Map the Google Play action parameters explicitly from validated values: `track`, `release_status`, conditionally applicable `rollout`, `package_name`, service-account JSON path, and resolved AAB path. Binary upload supports `completed`, `draft`, and `inProgress`; staged `inProgress` requires `0 < rollout < 1`, while completed/draft omit rollout. Reject `halted` because halting an existing release is outside this new-binary lane. `production` is never a default and requires `CONFIRM_PRODUCTION_DEPLOY=true`; CI routes it to fixed Environment `play-store-production`, whose reviewer/tag protection is an external prerequisite that file validation cannot prove.
 
 ### Secret-file ownership
 
 - Create a per-run temporary directory beneath `$RUNNER_TEMP` or `${TMPDIR:-/tmp}` with `umask 077`; decoded files use mode `0600`.
 - Mark each secret path as explicit user-owned input or generated temporary output. Cleanup deletes only generated files and their temporary directory; it never modifies or deletes an explicit `*_PATH` input.
+- Resolve/decode only the credential sets required by the selected distribution target. When environment signing credentials are used, generate `key.properties` under the owned temp root and pass `ANDROID_KEY_PROPERTIES_PATH`; never overwrite or delete a project copy.
 - If a higher-precedence explicit path is missing, unreadable, or invalid, fail rather than falling through to Base64 or a default.
 - Reject malformed/truncated Base64 and validate decoded JSON structure before use. Keep secret content out of arguments, logs, `$GITHUB_ENV`, and `$GITHUB_OUTPUT`.
 - Install cleanup handlers for normal completion, errors, `EXIT`, `HUP`, `INT`, and `TERM`; CI cleanup uses `if: always()`.
@@ -284,18 +310,18 @@ Map the Google Play action parameters explicitly from validated values: `track`,
 Generate `.github/workflows/release-android.yml` with:
 
 - `release: types: [published]` and `workflow_dispatch`;
-- inputs for `version_name`, `track`, `release_status`, and `run_tests`;
+- inputs for `version_name`, optional exact `flutter_version`, `track`, `release_status`, `run_tests`, `distribution_target`, `firebase_artifact_type`, `firebase_release_notes`, `confirm_firebase_package_match`, `confirm_firebase_aab_play_linked`, and `confirm_production`;
 - `permissions: contents: read`;
-- one repository-wide Play upload concurrency group independent of version, ref, or track, with `cancel-in-progress: false`, so app-global version-code allocation is serialized;
+- one repository-wide Play upload concurrency group independent of version, ref, or track, with current GitHub.com's `queue: max`, so active-track version-code selection and uploads are serialized without replacing older pending runs;
 - a bounded timeout;
-- exact release-tag checkout for `release.published`, and the trusted triggering SHA or an explicitly validated ref for manual runs;
-- checkout, Java, Flutter, Ruby/Bundler setup pinned to stable action versions verified during implementation;
-- Bundler caching, Flutter dependency restore, temporary secret decoding under `$RUNNER_TEMP`, `key.properties` creation, doctor, routed release lane, artifact summary, optional Slack success/failure notification, and unconditional cleanup;
+- checkout by immutable event `github.sha` for both events. For releases, validate/dereference the payload tag and require it to point at `HEAD`; use tag text only as version input. Manual runs use the native workflow-dispatch ref/SHA and expose no custom mutable ref input;
+- checkout, Java, and Ruby/Bundler setup pinned to full verified commit SHAs. Every nonlocal `uses:` reference must be exactly 40 lowercase hex characters. Install exact-version/architecture Flutter from the fixed official Linux manifest/base URL; require unique normalized archive paths, contained regular/directory/link members, and no devices/FIFOs/sockets/privilege or preserved ownership metadata; verify SHA-256 and extracted version; and never accept a production custom manifest;
+- Bundler caching, Flutter dependency restore, target-specific temporary secret decoding under `$RUNNER_TEMP`, a private escaped key-properties file passed by `ANDROID_KEY_PROPERTIES_PATH`, doctor, routed release lane, artifact summary, one optional Slack success/failure owner, and unconditional cleanup;
 - direct `bundle exec fastlane` rather than a Fastlane wrapper action.
 
-For a release event, both checkout and version source use `github.event.release.tag_name`. Manual execution uses the validated `version_name` input and the triggering SHA unless an explicit ref input is provided. Avoid platform-specific Base64 flags by using the bundled decode script.
+For a release event, checkout uses `github.sha` and the validated tag text supplies version name only after `refs/tags/<tag>^{commit}` equals `HEAD`. Manual execution uses the validated `version_name` input and native triggering SHA. Map all untrusted contexts through quoted step-local environment values; never interpolate them directly in `run:`. Avoid platform-specific Base64 flags by using the bundled decode script.
 
-The default upload track is `internal`. Map manual `run_tests` to `RUN_FLUTTER_TESTS`, validate all dispatch inputs, and expose a separate production confirmation input when `track=production`. Pin every action to a reviewed immutable commit SHA and annotate the corresponding human-readable release; never use a floating `latest` reference.
+The default upload track is `internal`. Map manual `run_tests` to `RUN_FLUTTER_TESTS`, validate every dispatch/release value, and reject unconfirmed production in a non-secret job. Confirmed production uses `play-store-production`; every other run uses fixed `play-store-nonproduction`. Document where each Environment stores secrets and that protection rules live in repository settings and remain unverified without settings evidence. Base64 files and signing scalars exist only in the decode/properties step; release receives generated paths and only scalar secret-backed Firebase values it actually consumes. Never expose raw secrets through workflow/job environment, arguments, outputs, summaries, or artifacts. Pin every action to a reviewed immutable commit SHA and annotate the corresponding release; never use floating refs. Document that `queue: max` is a current GitHub.com feature and Node 24 pins require a current runner.
 
 ## Optional integrations
 
@@ -305,6 +331,9 @@ The default upload track is `internal`. Map manual `run_tests` to `RUN_FLUTTER_T
 - Support `play-store`, `firebase`, and `both` distribution targets.
 - Validate Firebase app ID, testers/groups, release notes, plugin presence, artifact type, and credentials.
 - Check credential presence and API access when the selected Firebase lane can do so safely; otherwise report the unverified permission requirement and exact least-privilege setup step.
+- Require a linked, reviewed Google Play app for Firebase AAB distribution; allow APK distribution without that link. Explain the separate test-app signing certificate used for AAB tester APKs.
+- Require explicit `CONFIRM_FIREBASE_AAB_PLAY_LINKED=true` before an AAB distribution because file-only automation cannot prove the Play review/link state; keep external verification visible in the report.
+- Require selected release `applicationId` and `FIREBASE_APP_ID` to match one Firebase client mapping in `google-services.json`. When evidence is absent require `CONFIRM_FIREBASE_PACKAGE_MATCH=true`; never let confirmation override a detected package/app-ID mismatch. Selecting `firebase`/`both` derives effective `ENABLE_FIREBASE_APP_DISTRIBUTION=true`, while `play-store` derives false.
 - Do not let Firebase setup silently change the Play upload behavior.
 
 ### Slack
@@ -319,7 +348,7 @@ The default upload track is `internal`. Map manual `run_tests` to `RUN_FLUTTER_T
 
 `templates/PLAY_STORE_RELEASE.md` must be copy-ready for a generated project document and cover all 17 topics from the user request: purpose, generated files, Play Console/service account/upload key setup, GitHub secrets, first manual upload, local doctor/build/internal deployment, release and manual Actions runs, Slack, Firebase, troubleshooting, key loss/rotation, rollback, and promotion.
 
-The GitHub Secrets section enumerates the six required values plus exactly these optional secrets: `SLACK_WEBHOOK_URL`, `FIREBASE_APP_ID`, `FIREBASE_TESTER_GROUPS`, and `FIREBASE_TESTERS`. Firebase release notes and notification flags remain ordinary inputs or variables. The section includes no-wrap Base64 examples for macOS, Linux, and Windows PowerShell, warns against exposing encoded output, and gives optional `gh secret set SECRET_NAME` examples without ever mutating repository secrets on the user's behalf.
+The GitHub Secrets section separates: five signing/application values required for every target; `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64` required for Play targets; `FIREBASE_SERVICE_ACCOUNT_JSON_BASE64` required for Firebase targets; and exactly these four user-requested optional secret-backed values: `SLACK_WEBHOOK_URL`, `FIREBASE_APP_ID`, `FIREBASE_TESTER_GROUPS`, and `FIREBASE_TESTERS` (while Firebase App ID becomes a required value when that target is selected). Firebase release notes and notification flags remain ordinary inputs or variables. The section includes no-wrap Base64 examples for macOS, Linux, and Windows PowerShell, warns against exposing encoded output, and gives optional `gh secret set SECRET_NAME` examples without ever mutating repository secrets on the user's behalf.
 
 References provide:
 
@@ -327,7 +356,7 @@ References provide:
 - troubleshooting organized by doctor/build/signing/Play API/first release/Firebase/Slack/CI;
 - a least-privilege first-release checklist covering Play Console app creation, Android Developer API enablement, service-account creation and Play Console linkage, target-app release permissions, JSON issuance, Play App Signing, a possible first manual AAB, internal-track creation, tester registration, and final automation preflight.
 
-The release lane distinguishes authentication/permission errors from first-release or draft-app constraints and points to the corrective checklist instead of retrying blindly.
+The release lane distinguishes authentication/permission errors from first-release or draft-app constraints and points to the corrective checklist instead of retrying blindly. The checklist states that the Publishing API cannot bootstrap a completely new app and that a first AAB plus legal/app-content setup may require Play Console. It also records the current closed-testing gate for newly created personal developer accounts as a version-sensitive policy to re-check.
 
 All commands must be copyable. No real secret or repository-specific identifier appears in a template.
 
@@ -348,7 +377,7 @@ fastlane/test_output/
 
 ## Validation script
 
-`validate_release_setup.sh` supports `--project` and returns nonzero on hard failures. Validate:
+`validate_release_setup.sh` supports `--project`, `--context doctor|setup|build|deploy`, and explicit `--run-project-commands`; it returns nonzero on hard failures. `doctor` is the default read-only context and never runs `flutter pub get`, analyze, tests, build, or other project-mutating commands. Those checks are reported as not run with copy-ready commands unless setup/build execution is explicitly authorized. Validate:
 
 - project shape and inspection result;
 - required generated files;
@@ -363,7 +392,7 @@ fastlane/test_output/
 
 Report each check as `PASS`, `WARN`, or `FAIL`; missing optional tools are warnings, not fabricated successes. Never upload during validation.
 
-On a supplied real Flutter project, run the following exact validation matrix when its prerequisites are available:
+On a supplied real Flutter project, run the following exact validation matrix only when prerequisites are available and setup/build project-command execution is explicitly authorized; read-only doctor instead reports mutating commands as not run:
 
 ```bash
 flutter --version
@@ -389,13 +418,13 @@ An AAB verification requires a build-capable environment and user authorization.
 - bootstrap creation, zero-write dry runs, second-run idempotency, fault injection after each write with exact rollback, malformed/multiple markers, edited owned regions, and file-mode preservation;
 - preservation or explicit zero-write conflict for existing Fastlane/workflow/signing content;
 - `.gitignore` de-duplication;
-- doctor and validator exit behavior with `PASS`, `WARN`, `FAIL`, build context, deploy context, and missing secrets;
-- install/update/uninstall in temporary HOME directories, including manifest hashes, unrelated-directory and symlink refusal, installed-copy self-update refusal, and second-destination rollback;
-- version-name/code precedence and validation, exact-HEAD tags, multi-track remote maximum, failed track queries, bounds, and prohibition of deploy fallback;
-- stale/multiple AAB rejection and release application-ID mismatch rejection;
-- workflow assertions for exact tag checkout, non-cancelling repository-wide concurrency, immutable action pins, test-input mapping, protected production gate, and unconditional cleanup;
+- doctor and validator exit behavior with `PASS`, `WARN`, `FAIL`, read-only doctor, explicit project-command opt-in, build/deploy context, and missing secrets;
+- install/update/uninstall in temporary HOME directories, including receipts/exact-tree refusal, shared lock, journal recovery after every killed phase, unrelated-directory/symlink refusal, installed-copy self-update refusal, two-destination rollback, and post-commit uninstall quarantine cleanup;
+- version-name/code precedence and validation, equivalent/conflicting exact-HEAD tags, mixed empty/nonempty tracks, failed/all-empty track queries, bounds, and prohibition of deploy fallback;
+- quarantined prior output recovery, fresh/multiple AAB/APK rejection, build-command target assertion, and release application-ID mismatch rejection;
+- workflow assertions for event-SHA checkout/tag-to-HEAD verification, input injection resistance, non-cancelling repository-wide concurrency, every immutable action pin, target-specific secret scope, Java-properties escaping, environment routing/external protection status, and unconditional cleanup;
 - stubbed commands proving doctor, build, bootstrap, and validation never contact Play, Firebase, Slack, or GitHub;
-- `play-store`, `firebase`, and `both` routing, including partial-success reporting and exactly one Slack notification owner;
+- mocked Fastlane action parameters, binary-only Play listing skips, `play-store`/`firebase`/`both` credential routing, build-once behavior, nonzero partial success, cleanup, and exactly one Slack notification owner;
 - shell, Ruby, and YAML syntax where the relevant parser exists.
 
 Tests never need real Google, Firebase, Slack, or GitHub credentials and never contact external systems.

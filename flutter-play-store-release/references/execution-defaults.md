@@ -52,7 +52,7 @@ Ambient environment values never expand a delivery target, status, rollout, or S
 
 - Prefer current official sources for changing platform requirements.
 - Diagnose failures within scope and stop before unsafe retries.
-- After an unknown upload outcome, reconcile the exact prior version/code, artifact identifier, and destination at the provider; retry only after provider state is proven `not-delivered`. Retry runs never auto-notify Slack.
+- After an unknown upload outcome, reconcile the exact prior version/code, artifact SHA-256, and destination at the provider. Use only a fresh explicitly marked run after provider state is proven `not-delivered`; workflow reruns are rejected and unmarked retries cannot be inferred. Require the allocated code and newly built artifact hash to equal the reconciled tuple before upload. Retry runs never auto-notify Slack.
 - Mark checks blocked by missing access, credentials, hardware, or console state as not verified.
 - Do not claim success from intent, code inspection, a build-only result, or a favorable single check.
 - Preserve the primary build or deployment result when optional Slack notification fails.

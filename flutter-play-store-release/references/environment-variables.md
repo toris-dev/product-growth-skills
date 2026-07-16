@@ -44,6 +44,13 @@ Use this catalog for local Fastlane runs and generated GitHub Actions runs. Keep
 | `FIREBASE_ANDROID_ARTIFACT_TYPE` | Enum | Firebase build/delivery | `AAB` | Validated input or env > default; `both` forces AAB | Nonsecret | `AAB` or `APK` | Release owner |
 | `CONFIRM_FIREBASE_AAB_PLAY_LINKED` | Boolean confirmation | Firebase AAB | `false` | Explicit input or env only | Nonsecret | Exact `true` after reviewed Play link and test certificate | User/release approver |
 | `CONFIRM_FIREBASE_PACKAGE_MATCH` | Boolean confirmation | Firebase without mapping evidence | `false` | Explicit input or env; cannot override a detected mismatch | Nonsecret | Exact `true` only when `google-services.json` evidence is absent | User/release approver |
+| `RETRY_UNKNOWN_UPLOAD` | Reconciliation marker | fresh retry after unknown outcome | `false` | Explicit workflow input or env only | Nonsecret | Exact `true` or `false`; `true` requires the complete tuple | Release owner |
+| `CONFIRM_UPLOAD_RECONCILED` | Boolean confirmation | marked unknown-outcome retry | `false` | Explicit input or env only | Nonsecret | Exact lowercase string `true`; never inferred | User/release approver |
+| `RECONCILED_VERSION_NAME` | Version identifier | marked unknown-outcome retry | None | Explicit input or env only | Nonsecret | Exact requested version, with optional equivalent leading `v` | Release owner |
+| `RECONCILED_VERSION_CODE` | Integer | marked unknown-outcome retry | None | Explicit input or env only | Nonsecret | `1..2100000000`; must equal the allocated build code | Release owner |
+| `RECONCILED_ARTIFACT_SHA256` | SHA-256 | marked unknown-outcome retry | None | Explicit input or env only | Nonsecret identifier | Exactly 64 lowercase hexadecimal characters; must equal the newly built artifact hash | Release owner |
+| `RECONCILED_DESTINATIONS` | Destination tuple | marked unknown-outcome retry | None | Explicit input or env only | Nonsecret | Exact target: `play-store`, `firebase`, or `play-store,firebase` | Release owner |
+| `RECONCILED_PROVIDER_STATE` | Provider state | marked unknown-outcome retry | None | Explicit input or env only | Nonsecret | Exactly `not-delivered` | Release owner |
 | `FIREBASE_RELEASE_NOTES` | Text | Firebase delivery | Generated `Version NAME (CODE)` | Dispatch input > repository/Environment variable > generated text | Nonsecret | Length/control-character checks in CI | Release owner |
 | `FIREBASE_TESTERS` | CSV emails | Firebase delivery | None | Secret or nonsecret Environment value > absent | Optional secret-backed | Provider syntax; do not log if treated as sensitive | Tester owner |
 | `FIREBASE_TESTER_GROUPS` | CSV aliases | Firebase delivery | None | Secret or nonsecret Environment value > absent | Optional secret-backed | Provider group aliases | Tester owner |
@@ -83,7 +90,9 @@ The five every-target GitHub secrets are `APP_PACKAGE_NAME`, `ANDROID_KEYSTORE_B
 
 Slack failure must not mask the primary build or delivery result. The payload contains only repository, version, track, result, run URL, and source URL.
 
-For a retry after an unknown upload result, set `RETRY_UNKNOWN_UPLOAD=true` only after reconciling the provider. Require `CONFIRM_UPLOAD_RECONCILED=true`, exact `RECONCILED_VERSION_NAME`, positive `RECONCILED_VERSION_CODE`, lowercase 64-character `RECONCILED_ARTIFACT_SHA256` as the prior artifact identifier, exact `RECONCILED_DESTINATIONS`, and `RECONCILED_PROVIDER_STATE=not-delivered`. These values are an operator attestation; the runtime validates their shape and requested version/destination match but does not claim to recompute a prior artifact's SHA-256.
+Every `CONFIRM_*` authorization variable requires the exact lowercase string `true`. Do not treat `1`, `yes`, `on`, uppercase variants, surrounding whitespace, or native booleans passed directly to the Fastlane helper as confirmation. Ordinary preference flags may retain their documented boolean parsing.
+
+For a retry after an unknown upload result, set `RETRY_UNKNOWN_UPLOAD=true` only on a fresh run after reconciling the provider. Require `CONFIRM_UPLOAD_RECONCILED=true` and the five exact `RECONCILED_*` tuple fields above. The runtime first requires the allocated code to equal `RECONCILED_VERSION_CODE`, then hashes the newly built artifact and requires it to equal `RECONCILED_ARTIFACT_SHA256`, all before any upload adapter. An unmarked fresh retry cannot be inferred, and `github.run_attempt > 1` is rejected. The tuple is an operator attestation about the prior provider result, not a persistence system: if the rebuild hash differs, recover the exact artifact or begin a new explicitly authorized release.
 
 ## System-provided context
 

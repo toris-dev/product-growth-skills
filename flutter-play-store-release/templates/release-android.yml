@@ -75,6 +75,36 @@ on:
         required: true
         default: false
         type: boolean
+      retry_unknown_upload:
+        description: "Mark this fresh dispatch as a reconciled retry of an unknown provider outcome"
+        required: true
+        default: false
+        type: boolean
+      confirm_upload_reconciled:
+        description: "Confirm the exact unknown upload was reconciled as not delivered"
+        required: true
+        default: false
+        type: boolean
+      reconciled_version_name:
+        description: "Exact prior version name for a marked retry"
+        required: false
+        type: string
+      reconciled_version_code:
+        description: "Exact prior positive Play version code for a marked retry"
+        required: false
+        type: string
+      reconciled_artifact_sha256:
+        description: "Exact lowercase SHA-256 of the prior artifact for a marked retry"
+        required: false
+        type: string
+      reconciled_destinations:
+        description: "Exact prior destination: play-store, firebase, or play-store,firebase"
+        required: false
+        type: string
+      reconciled_provider_state:
+        description: "Must be exactly not-delivered for a marked retry"
+        required: false
+        type: string
       confirm_production:
         description: "Required acknowledgement for the production Play track"
         required: true
@@ -119,6 +149,13 @@ jobs:
           CONFIRM_DUAL_DELIVERY: ${{ inputs.confirm_dual_delivery }}
           CONFIRM_PLAY_RELEASE_POLICY: ${{ inputs.confirm_play_release_policy }}
           CONFIRM_SLACK_NOTIFICATION: ${{ inputs.confirm_slack_notification }}
+          RETRY_UNKNOWN_UPLOAD: ${{ inputs.retry_unknown_upload }}
+          CONFIRM_UPLOAD_RECONCILED: ${{ inputs.confirm_upload_reconciled }}
+          RECONCILED_VERSION_NAME: ${{ inputs.reconciled_version_name }}
+          RECONCILED_VERSION_CODE: ${{ inputs.reconciled_version_code }}
+          RECONCILED_ARTIFACT_SHA256: ${{ inputs.reconciled_artifact_sha256 }}
+          RECONCILED_DESTINATIONS: ${{ inputs.reconciled_destinations }}
+          RECONCILED_PROVIDER_STATE: ${{ inputs.reconciled_provider_state }}
           CONFIRM_PRODUCTION: ${{ inputs.confirm_production }}
         shell: bash
         run: |
@@ -157,7 +194,33 @@ jobs:
           [[ "$CONFIRM_DUAL_DELIVERY" =~ ^(true|false)$ ]]
           [[ "$CONFIRM_PLAY_RELEASE_POLICY" =~ ^(true|false)$ ]]
           [[ "$CONFIRM_SLACK_NOTIFICATION" =~ ^(true|false)$ ]]
+          [[ "$RETRY_UNKNOWN_UPLOAD" =~ ^(true|false)$ ]]
+          [[ "$CONFIRM_UPLOAD_RECONCILED" =~ ^(true|false)$ ]]
           [[ "$CONFIRM_PRODUCTION" =~ ^(true|false)$ ]]
+          if [[ "$RETRY_UNKNOWN_UPLOAD" == "true" ]]; then
+            [[ "$CONFIRM_UPLOAD_RECONCILED" == "true" ]] || {
+              printf 'Unknown upload retry requires confirm_upload_reconciled=true.\n' >&2
+              exit 1
+            }
+            [[ "$RECONCILED_VERSION_NAME" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]
+            [[ "${RECONCILED_VERSION_NAME#v}" == "${VERSION_NAME#v}" ]] || {
+              printf 'Reconciled version name does not match version_name.\n' >&2
+              exit 1
+            }
+            [[ "$RECONCILED_VERSION_CODE" =~ ^[1-9][0-9]{0,9}$ ]]
+            (( RECONCILED_VERSION_CODE <= 2100000000 ))
+            [[ "$RECONCILED_ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+            expected_destinations="$DISTRIBUTION_TARGET"
+            [[ "$expected_destinations" != "both" ]] || expected_destinations=play-store,firebase
+            [[ "$RECONCILED_DESTINATIONS" == "$expected_destinations" ]]
+            [[ "$RECONCILED_PROVIDER_STATE" == "not-delivered" ]]
+          else
+            [[ "$CONFIRM_UPLOAD_RECONCILED" == "false" ]]
+            [[ -z "$RECONCILED_VERSION_NAME$RECONCILED_VERSION_CODE$RECONCILED_ARTIFACT_SHA256$RECONCILED_DESTINATIONS$RECONCILED_PROVIDER_STATE" ]] || {
+              printf 'Reconciliation tuple requires retry_unknown_upload=true.\n' >&2
+              exit 1
+            }
+          fi
           if [[ "$DISTRIBUTION_TARGET" == "both" && "$CONFIRM_DUAL_DELIVERY" != "true" ]]; then
             printf 'Dual delivery rejected: set confirm_dual_delivery=true after authorizing both destinations.\n' >&2
             exit 1
@@ -226,6 +289,13 @@ jobs:
           CONFIRM_DUAL_DELIVERY: ${{ inputs.confirm_dual_delivery }}
           CONFIRM_PLAY_RELEASE_POLICY: ${{ inputs.confirm_play_release_policy }}
           CONFIRM_SLACK_NOTIFICATION: ${{ inputs.confirm_slack_notification }}
+          RETRY_UNKNOWN_UPLOAD: ${{ inputs.retry_unknown_upload }}
+          CONFIRM_UPLOAD_RECONCILED: ${{ inputs.confirm_upload_reconciled }}
+          RECONCILED_VERSION_NAME: ${{ inputs.reconciled_version_name }}
+          RECONCILED_VERSION_CODE: ${{ inputs.reconciled_version_code }}
+          RECONCILED_ARTIFACT_SHA256: ${{ inputs.reconciled_artifact_sha256 }}
+          RECONCILED_DESTINATIONS: ${{ inputs.reconciled_destinations }}
+          RECONCILED_PROVIDER_STATE: ${{ inputs.reconciled_provider_state }}
           CONFIRM_PRODUCTION: ${{ inputs.confirm_production }}
           RELEASE_EVENT_SLACK_AUTHORIZED: ${{ vars.ENABLE_GITHUB_RELEASE_SLACK_NOTIFICATION }}
         shell: bash
@@ -255,6 +325,13 @@ jobs:
             confirm_dual=false
             confirm_policy=false
             confirm_slack="$RELEASE_EVENT_SLACK_AUTHORIZED"
+            retry_unknown=false
+            confirm_reconciled=false
+            reconciled_version_name=
+            reconciled_version_code=
+            reconciled_artifact_sha256=
+            reconciled_destinations=
+            reconciled_provider_state=
             confirm_production=false
             [[ "$confirm_slack" =~ ^(true|false)$ ]] || confirm_slack=false
           else
@@ -271,6 +348,13 @@ jobs:
             confirm_dual="$CONFIRM_DUAL_DELIVERY"
             confirm_policy="$CONFIRM_PLAY_RELEASE_POLICY"
             confirm_slack="$CONFIRM_SLACK_NOTIFICATION"
+            retry_unknown="$RETRY_UNKNOWN_UPLOAD"
+            confirm_reconciled="$CONFIRM_UPLOAD_RECONCILED"
+            reconciled_version_name="$RECONCILED_VERSION_NAME"
+            reconciled_version_code="$RECONCILED_VERSION_CODE"
+            reconciled_artifact_sha256="$RECONCILED_ARTIFACT_SHA256"
+            reconciled_destinations="$RECONCILED_DESTINATIONS"
+            reconciled_provider_state="$RECONCILED_PROVIDER_STATE"
             confirm_production="$CONFIRM_PRODUCTION"
           fi
           [[ "$version_name" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]
@@ -284,17 +368,40 @@ jobs:
           [[ "$confirm_dual" =~ ^(true|false)$ ]]
           [[ "$confirm_policy" =~ ^(true|false)$ ]]
           [[ "$confirm_slack" =~ ^(true|false)$ ]]
+          [[ "$retry_unknown" =~ ^(true|false)$ ]]
+          [[ "$confirm_reconciled" =~ ^(true|false)$ ]]
           [[ "$confirm_production" =~ ^(true|false)$ ]]
+          if [[ "$retry_unknown" == "true" ]]; then
+            [[ "$confirm_reconciled" == "true" ]]
+            [[ "$reconciled_version_name" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]
+            [[ "${reconciled_version_name#v}" == "${version_name#v}" ]]
+            [[ "$reconciled_version_code" =~ ^[1-9][0-9]{0,9}$ ]]
+            (( reconciled_version_code <= 2100000000 ))
+            [[ "$reconciled_artifact_sha256" =~ ^[0-9a-f]{64}$ ]]
+            expected_destinations="$distribution_target"
+            [[ "$expected_destinations" != "both" ]] || expected_destinations=play-store,firebase
+            [[ "$reconciled_destinations" == "$expected_destinations" ]]
+            [[ "$reconciled_provider_state" == "not-delivered" ]]
+          else
+            [[ "$confirm_reconciled" == "false" ]]
+            [[ -z "$reconciled_version_name$reconciled_version_code$reconciled_artifact_sha256$reconciled_destinations$reconciled_provider_state" ]]
+          fi
           python3 - "$input_root" "$version_name" "$track" "$release_status" \
             "$run_tests" "$distribution_target" "$firebase_artifact_type" \
             "$confirm_package" "$confirm_linked" "$rollout" "$confirm_dual" \
-            "$confirm_policy" "$confirm_slack" "$confirm_production" <<'PY'
+            "$confirm_policy" "$confirm_slack" "$retry_unknown" "$confirm_reconciled" \
+            "$reconciled_version_name" "$reconciled_version_code" \
+            "$reconciled_artifact_sha256" "$reconciled_destinations" \
+            "$reconciled_provider_state" "$confirm_production" <<'PY'
           import os, sys
           root = sys.argv[1]
           names = ("version_name", "track", "release_status", "run_tests",
                    "distribution_target", "firebase_artifact_type",
                    "confirm_package", "confirm_linked", "rollout", "confirm_dual",
-                   "confirm_policy", "confirm_slack", "confirm_production")
+                   "confirm_policy", "confirm_slack", "retry_unknown", "confirm_reconciled",
+                   "reconciled_version_name", "reconciled_version_code",
+                   "reconciled_artifact_sha256", "reconciled_destinations",
+                   "reconciled_provider_state", "confirm_production")
           for name, value in zip(names, sys.argv[2:]):
               with open(os.path.join(root, name), "x", encoding="utf-8", newline="") as handle:
                   handle.write(value)
@@ -521,6 +628,13 @@ jobs:
           CONFIRM_FIREBASE_AAB_PLAY_LINKED=$(cat "$input_root/confirm_linked")
           CONFIRM_DUAL_DELIVERY=$(cat "$input_root/confirm_dual")
           CONFIRM_PLAY_RELEASE_POLICY=$(cat "$input_root/confirm_policy")
+          RETRY_UNKNOWN_UPLOAD=$(cat "$input_root/retry_unknown")
+          CONFIRM_UPLOAD_RECONCILED=$(cat "$input_root/confirm_reconciled")
+          RECONCILED_VERSION_NAME=$(cat "$input_root/reconciled_version_name")
+          RECONCILED_VERSION_CODE=$(cat "$input_root/reconciled_version_code")
+          RECONCILED_ARTIFACT_SHA256=$(cat "$input_root/reconciled_artifact_sha256")
+          RECONCILED_DESTINATIONS=$(cat "$input_root/reconciled_destinations")
+          RECONCILED_PROVIDER_STATE=$(cat "$input_root/reconciled_provider_state")
           CONFIRM_PRODUCTION_DEPLOY=$(cat "$input_root/confirm_production")
           APP_PACKAGE_NAME=$(cat "$secret_root/app-package-name")
           ANDROID_KEY_PROPERTIES_PATH="$secret_root/key.properties"
@@ -542,7 +656,9 @@ jobs:
           export VERSION_NAME PLAY_STORE_TRACK RUN_FLUTTER_TESTS \
             DISTRIBUTION_TARGET FIREBASE_ANDROID_ARTIFACT_TYPE FIREBASE_RELEASE_NOTES \
             CONFIRM_FIREBASE_PACKAGE_MATCH CONFIRM_FIREBASE_AAB_PLAY_LINKED CONFIRM_DUAL_DELIVERY \
-            CONFIRM_PLAY_RELEASE_POLICY CONFIRM_PRODUCTION_DEPLOY \
+            CONFIRM_PLAY_RELEASE_POLICY CONFIRM_PRODUCTION_DEPLOY RETRY_UNKNOWN_UPLOAD \
+            CONFIRM_UPLOAD_RECONCILED RECONCILED_VERSION_NAME RECONCILED_VERSION_CODE \
+            RECONCILED_ARTIFACT_SHA256 RECONCILED_DESTINATIONS RECONCILED_PROVIDER_STATE \
             APP_PACKAGE_NAME ANDROID_KEY_PROPERTIES_PATH GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_PATH \
             FIREBASE_SERVICE_ACCOUNT_JSON_PATH ENABLE_FIREBASE_APP_DISTRIBUTION \
             FIREBASE_APP_ID FIREBASE_TESTER_GROUPS FIREBASE_TESTERS \
@@ -592,6 +708,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$(cat "$RUNNER_TEMP/flutter-play-store-release-inputs/confirm_slack")" == "true" ]] || exit 0
+          [[ "$(cat "$RUNNER_TEMP/flutter-play-store-release-inputs/retry_unknown")" == "false" ]] || exit 0
           [[ "${GITHUB_RUN_ATTEMPT:-1}" == "1" ]] || exit 0
           [[ -n "$SLACK_WEBHOOK_URL" ]] || exit 0
           notify_root="$RUNNER_TEMP/flutter-play-store-release-notification"

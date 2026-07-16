@@ -3,6 +3,7 @@
 # Shared, dependency-free release logic for the generated Android Fastlane lanes.
 # External services are reached only through FastlaneAdapter after preflight succeeds.
 require "base64"
+require "digest"
 require "fileutils"
 require "json"
 require "open3"
@@ -324,6 +325,7 @@ module FlutterPlayStoreRelease
       successful = []
       failed_destination = nil
       work_error = nil
+      retry_identity = nil
 
       begin
         begin
@@ -347,12 +349,12 @@ module FlutterPlayStoreRelease
             firebase_enabled: false
           )
           target = steps == %w[play-store firebase] ? "both" : steps.first
-          if target == "both" && !truthy?(environment["CONFIRM_DUAL_DELIVERY"])
+          if target == "both" && !confirmed?(environment["CONFIRM_DUAL_DELIVERY"])
             raise ConfigurationError,
               "dual delivery requires explicit distribution_target:both and CONFIRM_DUAL_DELIVERY=true"
           end
           apply_authorized_release_policy!(normalized_options, environment, steps)
-          validate_retry_reconciliation!(normalized_options, environment, target)
+          retry_identity = validate_retry_reconciliation!(normalized_options, environment, target)
           artifact_type = release_artifact_type(steps, environment)
           validate_release_policy!(steps, environment, artifact_type)
           root = canonical_directory(project_root, "project root")
@@ -392,12 +394,20 @@ module FlutterPlayStoreRelease
           else
             resolve_local_version_code(environment, pubspec_code, actions)
           end
+          if retry_identity && version_code != retry_identity.fetch(:version_code)
+            raise ConfigurationError,
+              "allocated version code does not match the reconciled unknown upload"
+          end
 
           artifact_path = build_once(
             project_root: root, artifact_type: artifact_type, version_name: version_name,
             version_code: version_code, flavor: flavor, target: target_file,
             environment: signing_environment, actions: actions
           )
+          if retry_identity && Digest::SHA256.file(artifact_path).hexdigest != retry_identity.fetch(:artifact_sha256)
+            raise ConfigurationError,
+              "built artifact SHA-256 does not match the reconciled unknown upload"
+          end
 
           if steps.include?("play-store")
             begin
@@ -549,6 +559,10 @@ module FlutterPlayStoreRelease
 
     def truthy?(value)
       %w[1 true yes on].include?(value.to_s.strip.downcase)
+    end
+
+    def confirmed?(value)
+      value.is_a?(String) && value == "true"
     end
 
     def ordered_unique(values)
@@ -883,11 +897,11 @@ module FlutterPlayStoreRelease
         end
       end
       if steps.include?("play-store") && env.fetch("PLAY_STORE_TRACK", "internal") == "production" &&
-          !truthy?(env["CONFIRM_PRODUCTION_DEPLOY"])
+          !confirmed?(env["CONFIRM_PRODUCTION_DEPLOY"])
         raise ConfigurationError, "production requires CONFIRM_PRODUCTION_DEPLOY=true"
       end
       if steps.include?("firebase") && artifact_type == "AAB" &&
-          !truthy?(env["CONFIRM_FIREBASE_AAB_PLAY_LINKED"])
+          !confirmed?(env["CONFIRM_FIREBASE_AAB_PLAY_LINKED"])
         raise ConfigurationError,
           "Firebase AAB distribution requires CONFIRM_FIREBASE_AAB_PLAY_LINKED=true after link and certificate review"
       end
@@ -914,12 +928,12 @@ module FlutterPlayStoreRelease
       unless %w[completed draft inProgress].include?(requested_status)
         raise ConfigurationError, "release status must be completed, draft, or inProgress"
       end
-      if requested_status != "completed" && !truthy?(env["CONFIRM_PLAY_RELEASE_POLICY"])
+      if requested_status != "completed" && !confirmed?(env["CONFIRM_PLAY_RELEASE_POLICY"])
         raise ConfigurationError,
           "non-default Play release status requires CONFIRM_PLAY_RELEASE_POLICY=true"
       end
       if requested_status == "inProgress"
-        if requested_rollout.nil? || !truthy?(env["CONFIRM_PLAY_RELEASE_POLICY"])
+        if requested_rollout.nil? || !confirmed?(env["CONFIRM_PLAY_RELEASE_POLICY"])
           raise ConfigurationError,
             "inProgress requires an exact rollout lane option and CONFIRM_PLAY_RELEASE_POLICY=true"
         end
@@ -933,9 +947,13 @@ module FlutterPlayStoreRelease
     end
 
     def validate_retry_reconciliation!(options, env, target)
-      return unless truthy?(env["RETRY_UNKNOWN_UPLOAD"])
+      retry_marker = present(env["RETRY_UNKNOWN_UPLOAD"])
+      unless retry_marker.nil? || %w[true false].include?(retry_marker)
+        raise ConfigurationError, "RETRY_UNKNOWN_UPLOAD must be exactly true or false"
+      end
+      return unless retry_marker == "true"
 
-      unless truthy?(env["CONFIRM_UPLOAD_RECONCILED"])
+      unless confirmed?(env["CONFIRM_UPLOAD_RECONCILED"])
         raise ConfigurationError,
           "unknown upload retry requires CONFIRM_UPLOAD_RECONCILED=true after provider reconciliation"
       end
@@ -947,7 +965,9 @@ module FlutterPlayStoreRelease
       if reconciled_version != normalize_version_name(requested_version)
         raise ConfigurationError, "reconciled version name must exactly match the requested release version"
       end
-      validate_version_code(env["RECONCILED_VERSION_CODE"], source: "reconciled version code")
+      reconciled_code = validate_version_code(
+        env["RECONCILED_VERSION_CODE"], source: "reconciled version code"
+      )
       unless env["RECONCILED_ARTIFACT_SHA256"].to_s.match?(/\A[0-9a-f]{64}\z/)
         raise ConfigurationError, "reconciled artifact SHA-256 must be exactly 64 lowercase hexadecimal characters"
       end
@@ -958,6 +978,10 @@ module FlutterPlayStoreRelease
       unless env["RECONCILED_PROVIDER_STATE"].to_s == "not-delivered"
         raise ConfigurationError, "provider reconciliation must prove the exact prior upload was not delivered"
       end
+      {
+        version_code: reconciled_code,
+        artifact_sha256: env["RECONCILED_ARTIFACT_SHA256"].to_s
+      }
     end
 
     def prepare_credentials(steps:, env:, project_root:, temp_root:, records:)
@@ -1085,7 +1109,7 @@ module FlutterPlayStoreRelease
     def validate_firebase_mapping!(env, actions, flavor:)
       mappings = Array(actions.firebase_clients(flavor: flavor))
       if mappings.empty?
-        unless truthy?(env["CONFIRM_FIREBASE_PACKAGE_MATCH"])
+        unless confirmed?(env["CONFIRM_FIREBASE_PACKAGE_MATCH"])
           raise ConfigurationError,
             "google-services.json mapping evidence is absent; require CONFIRM_FIREBASE_PACKAGE_MATCH=true"
         end
@@ -1261,7 +1285,7 @@ module FlutterPlayStoreRelease
     def notify_if_requested(env, actions, result)
       return if env["SLACK_NOTIFICATION_OWNER"].to_s == "github-actions"
       return if truthy?(env["RETRY_UNKNOWN_UPLOAD"])
-      return unless truthy?(env["CONFIRM_SLACK_NOTIFICATION"])
+      return unless confirmed?(env["CONFIRM_SLACK_NOTIFICATION"])
       webhook = present(env["SLACK_WEBHOOK_URL"])
       return unless webhook
       preference_name = result["status"] == "SUCCESS" ? "SLACK_NOTIFY_SUCCESS" : "SLACK_NOTIFY_FAILURE"

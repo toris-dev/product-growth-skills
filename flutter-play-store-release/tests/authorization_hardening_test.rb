@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "fastlane_helper_test"
+require "digest"
 
 class FlutterPlayStoreReleaseCoordinatorTest
   def test_authorization_dual_delivery_requires_an_explicit_target_and_confirmation
@@ -84,8 +85,8 @@ class FlutterPlayStoreReleaseCoordinatorTest
     reconciliation = {
       "CONFIRM_UPLOAD_RECONCILED" => "true",
       "RECONCILED_VERSION_NAME" => "1.3.9",
-      "RECONCILED_VERSION_CODE" => "41",
-      "RECONCILED_ARTIFACT_SHA256" => "a" * 64,
+      "RECONCILED_VERSION_CODE" => "42",
+      "RECONCILED_ARTIFACT_SHA256" => Digest::SHA256.hexdigest("artifact 0"),
       "RECONCILED_DESTINATIONS" => "play-store",
       "RECONCILED_PROVIDER_STATE" => "not-delivered"
     }
@@ -108,6 +109,28 @@ class FlutterPlayStoreReleaseCoordinatorTest
     assert_empty calls(:google_play_track_version_codes)
 
     @actions = FakeActions.new(@project)
+    assert_raises(FPRS::ConfigurationError) do
+      release(target: "play-store", env: retry_env.merge(
+        reconciliation,
+        "RECONCILED_VERSION_NAME" => "1.4.0",
+        "RECONCILED_VERSION_CODE" => "41"
+      ))
+    end
+    assert_empty calls(:flutter_build)
+    assert_empty calls(:upload_to_play_store)
+
+    @actions = FakeActions.new(@project)
+    assert_raises(FPRS::ConfigurationError) do
+      release(target: "play-store", env: retry_env.merge(
+        reconciliation,
+        "RECONCILED_VERSION_NAME" => "1.4.0",
+        "RECONCILED_ARTIFACT_SHA256" => "a" * 64
+      ))
+    end
+    assert_equal 1, calls(:flutter_build).length
+    assert_empty calls(:upload_to_play_store)
+
+    @actions = FakeActions.new(@project)
     release(target: "play-store", env: retry_env.merge(
       reconciliation,
       "RECONCILED_VERSION_NAME" => "1.4.0",
@@ -116,6 +139,29 @@ class FlutterPlayStoreReleaseCoordinatorTest
     ))
     assert_equal 1, calls(:upload_to_play_store).length
     assert_empty calls(:notify_slack)
+  end
+
+  def test_authorization_confirmation_aliases_never_authorize_confirm_gates
+    assert FPRS.send(:confirmed?, "true")
+    ["1", "yes", "on", "TRUE", " true ", true].each do |value|
+      refute FPRS.send(:confirmed?, value), "#{value.inspect} unexpectedly confirmed an external action"
+    end
+
+    %w[1 yes on].each do |alias_value|
+      @actions = FakeActions.new(@project)
+      assert_raises(FPRS::ConfigurationError) do
+        release(
+          target: "both",
+          env: common_env.merge(
+            firebase_env,
+            "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_PATH" => @play_json,
+            "CONFIRM_DUAL_DELIVERY" => alias_value
+          )
+        )
+      end
+      assert_empty calls(:google_play_track_version_codes)
+      assert_empty calls(:firebase_app_distribution)
+    end
   end
 end
 
@@ -184,5 +230,25 @@ class FlutterPlayStoreReleaseAuthorizationContractTest < Minitest::Test
     assert_includes troubleshooting, "CONFIRM_UPLOAD_RECONCILED=true"
     assert_match(/provider proves `not-delivered`/, troubleshooting)
     refute_match(/retry (?:the serialized upload )?once/i, troubleshooting)
+  end
+
+  def test_authorization_runtime_uses_strict_confirmation_for_every_external_gate
+    runtime = File.read(File.join(ROOT, "templates", "FlutterPlayStoreRelease.rb"))
+    gates = %w[
+      CONFIRM_DUAL_DELIVERY
+      CONFIRM_PRODUCTION_DEPLOY
+      CONFIRM_FIREBASE_AAB_PLAY_LINKED
+      CONFIRM_PLAY_RELEASE_POLICY
+      CONFIRM_UPLOAD_RECONCILED
+      CONFIRM_FIREBASE_PACKAGE_MATCH
+      CONFIRM_SLACK_NOTIFICATION
+    ]
+
+    gates.each do |gate|
+      assert_match(/confirmed\?\((?:env|environment)\["#{gate}"\]\)/, runtime,
+        "#{gate} is not guarded by the strict confirmation predicate")
+      refute_match(/truthy\?\((?:env|environment)\["#{gate}"\]\)/, runtime,
+        "#{gate} still accepts broad truthy aliases")
+    end
   end
 end

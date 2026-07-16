@@ -109,6 +109,7 @@ The last command uploads. Run it only after the user explicitly names that track
 - Require explicit authorization for Play or Firebase uploads, Slack messages, production, promotion, rollout changes, key operations, console changes, and secret mutation.
 - Pin Play-only and Firebase-only lanes to their destination. Require exact `distribution_target:both` plus `CONFIRM_DUAL_DELIVERY=true` for dual delivery; ambient environment values never expand a release.
 - Pin ordinary Play delivery to `completed` with no rollout. Require exact lane options and `CONFIRM_PLAY_RELEASE_POLICY=true` for `draft`, `inProgress`, or rollout.
+- Accept only the exact lowercase string `true` at every `CONFIRM_*` runtime authority gate. Values such as `1`, `yes`, `on`, `TRUE`, or whitespace-padded text do not authorize an action.
 - Never print secret values, use shell tracing around secrets, or commit `.env`, `key.properties`, keystores, or service-account JSON.
 - Treat a successful build as a build, not as deployment evidence.
 - Treat Slack notification failure as a warning. Slack failure must not mask a build or deployment failure, and it must not turn a successful release into a failed release.
@@ -153,7 +154,9 @@ Exactly four values are optional secret-backed configuration:
 
 `FIREBASE_APP_ID` becomes a required runtime value when `firebase` or `both` is selected. It may instead be a documented nonsecret repository or Environment variable when the identifier is not treated as sensitive. Tester names and groups may likewise be nonsecret variables when policy permits. Firebase release notes, distribution flags, confirmation flags, track, rollout, and notification flags are not secrets.
 
-Do not blindly rerun an unknown upload result. Reconcile the exact prior version name/code, artifact SHA-256 identifier, and destination at the provider. Retry only when the provider proves `not-delivered`, the exact reconciliation attestation matches the requested version/destination, and `CONFIRM_UPLOAD_RECONCILED=true`; retry runs suppress automatic Slack.
+Do not blindly rerun an unknown upload result. Start a fresh dispatch and set the seven retry inputs: `retry_unknown_upload`, `confirm_upload_reconciled`, `reconciled_version_name`, `reconciled_version_code`, `reconciled_artifact_sha256`, `reconciled_destinations`, and `reconciled_provider_state`. The provider must prove `not-delivered`; the allocated version code must equal the reconciled code; and the newly built artifact SHA-256 must equal the reconciled SHA-256 before upload. A mismatch fails closed. An unmarked fresh dispatch cannot be recognized as a retry, and workflow reruns are rejected rather than reconciled implicitly. Retry runs suppress automatic Slack.
+
+The generated workflow currently defines 22 top-level `workflow_dispatch` inputs. GitHub.com allows 25, so only three additional inputs fit without consolidating or redesigning the contract; GitHub Enterprise Server limits can differ by version.
 
 Enter secrets yourself in GitHub settings. If you prefer the GitHub CLI, `gh secret set SECRET_NAME` is a user-run option; the skill must not execute it without explicit authorization.
 

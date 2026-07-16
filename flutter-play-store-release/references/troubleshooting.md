@@ -46,7 +46,7 @@ Play rejects a version code that has already been used, even when it is not visi
 4. Select the maximum active code plus one within `1..2100000000`.
 5. If the rejection definitively proves no upload occurred, rebuild with the new code only after a fresh explicit deploy authorization.
 
-Google and Fastlane do not provide this workflow with an authoritative allocator for every code ever used. If provider outcome is unknown, reconcile the exact prior version name/code, artifact SHA-256 identifier, and destination. Retry only after the provider proves `not-delivered`, the exact attestation is supplied, and `CONFIRM_UPLOAD_RECONCILED=true`; never upload the old artifact blindly.
+Google and Fastlane do not provide this workflow with an authoritative allocator for every code ever used. If provider outcome is unknown, reconcile the exact prior version name/code, artifact SHA-256, and destination. Do not rerun the workflow; begin a fresh marked dispatch only after the provider proves `not-delivered`, `CONFIRM_UPLOAD_RECONCILED=true`, and all seven retry inputs are supplied. The runtime requires the allocated code and newly built artifact SHA-256 to equal the reconciled tuple before upload. A mismatch is not retryable evidence: recover the exact artifact or begin a new explicitly authorized release. An unmarked fresh retry cannot be inferred.
 
 ## Signing
 

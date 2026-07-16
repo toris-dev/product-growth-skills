@@ -177,6 +177,20 @@ Use `workflow_dispatch` for a deliberate target, track, version, status, tests f
 - Do not use this binary-upload lane to halt an existing release.
 - Treat reviewer/tag protection as required external setup, not as a validated file property.
 
+Every `CONFIRM_*` runtime gate accepts only the exact lowercase string `true`; convenience aliases, uppercase variants, surrounding whitespace, and native booleans passed directly to the helper fail closed. The workflow currently uses 22 of GitHub.com's 25 top-level `workflow_dispatch` inputs, leaving three for future additions. Check the limit for the deployed GitHub Enterprise Server version before installing this template there.
+
+For a provider outcome that remains unknown, do not use the Actions **Re-run jobs** control: every run attempt after the first is rejected. Reconcile the prior provider state, start a fresh dispatch, and supply all seven retry inputs:
+
+- `retry_unknown_upload=true`
+- `confirm_upload_reconciled=true`
+- `reconciled_version_name` equal to `version_name`
+- `reconciled_version_code` equal to the exact prior positive build code
+- `reconciled_artifact_sha256` equal to the exact lowercase SHA-256 of the prior artifact
+- `reconciled_destinations` equal to `play-store`, `firebase`, or `play-store,firebase` for `both`
+- `reconciled_provider_state=not-delivered`
+
+Leaving `retry_unknown_upload=false` requires the confirmation and tuple fields to remain false or empty; an unmarked fresh retry cannot be inferred. Before upload, the runtime requires its allocated version code to equal the reconciled code and recomputes the newly built artifact SHA-256. Any mismatch stops before the provider adapter. If the rebuild is not byte-for-byte identical, recover the exact artifact or begin a new explicitly authorized release; the workflow does not persist or recover prior artifacts.
+
 ## 13. Slack notifications
 
 Set `SLACK_WEBHOOK_URL` only when notifications are wanted. Keep one notification owner with `SLACK_NOTIFICATION_OWNER=fastlane` locally or `github-actions` in CI. `SLACK_NOTIFY_SUCCESS` and `SLACK_NOTIFY_FAILURE` remain preferences behind the default-off authority gate: require `CONFIRM_SLACK_NOTIFICATION=true` for a current run. Release events require the separate standing variable `ENABLE_GITHUB_RELEASE_SLACK_NOTIFICATION=true`.

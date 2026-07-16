@@ -80,6 +80,8 @@ Interpret an explicit internal deploy as authorization for only the named intern
 
 Never derive Firebase or `both` delivery from ambient environment values. The Play and Firebase lanes pin their own destination. `both` requires the exact lane option `distribution_target:both` plus `CONFIRM_DUAL_DELIVERY=true`. Ordinary Play deploys pin `completed` and no rollout; `draft` or `inProgress` must be exact lane options and require `CONFIRM_PLAY_RELEASE_POLICY=true`. A Slack send independently requires `CONFIRM_SLACK_NOTIFICATION=true`.
 
+Treat every `CONFIRM_*` authority gate as an exact token: only the lowercase string `true` authorizes the action. Reject aliases such as `1`, `yes`, `on`, uppercase variants, surrounding whitespace, and native booleans passed directly to the Fastlane helper. Truthy parsing is reserved for ordinary preferences and execution flags.
+
 Never create a populated `.env`, `android/key.properties`, keystore, service-account JSON, or GitHub secret unless the user explicitly requests that exact mutation. Inspect credential presence without printing values. Never enable shell tracing while secrets may be present.
 
 ## Execute
@@ -140,11 +142,11 @@ PLAY_STORE_TRACK=internal bundle exec fastlane android release_play_store
 
 Replace `internal` only with the track the user explicitly named. Stop before network access on failed package, signing, credential, track, artifact, or version checks. Never claim deployment from a successful build alone.
 
-Do not retry an unknown upload outcome. Reconcile the exact prior version name/code, artifact SHA-256 identifier, and destination at the provider. A retry marked with `RETRY_UNKNOWN_UPLOAD=true` must include the exact reconciliation fields, prove provider state `not-delivered`, and set `CONFIRM_UPLOAD_RECONCILED=true` before any adapter is called. Retry/reconciliation runs never send automatic Slack notifications; after final provider state is known, a separately authorized manual message is required.
+Do not retry an unknown upload outcome implicitly. A fresh run marked with `RETRY_UNKNOWN_UPLOAD=true` must include the exact prior version name/code, artifact SHA-256, destination, and provider state `not-delivered`, plus `CONFIRM_UPLOAD_RECONCILED=true`, before any adapter is called. The allocated build code must equal the reconciled code, and the SHA-256 of the newly built artifact must equal the reconciled SHA-256 before upload. Fail closed when either differs; recovering the exact prior artifact or starting a new explicitly authorized release is an operator decision. An unmarked fresh dispatch cannot be inferred as a retry, and a GitHub workflow rerun with `github.run_attempt > 1` is always rejected. Retry/reconciliation runs never send automatic Slack notifications; after final provider state is known, a separately authorized manual message is required.
 
 ### CI, Firebase, and Slack
 
-For `ci`, configure the generated workflow and document the fixed GitHub Environments `play-store-nonproduction` and `play-store-production`. GitHub `release.published` delivery is disabled by default and becomes a standing authorization only when the user explicitly sets `ENABLE_GITHUB_RELEASE_DEPLOY=true`; that event remains fixed to Play/internal/completed. Leave reviewer and tag protection as an external, unverified repository setting.
+For `ci`, configure the generated workflow and document the fixed GitHub Environments `play-store-nonproduction` and `play-store-production`. GitHub `release.published` delivery is disabled by default and becomes a standing authorization only when the user explicitly sets `ENABLE_GITHUB_RELEASE_DEPLOY=true`; that event remains fixed to Play/internal/completed. A marked manual retry uses exactly seven inputs: `retry_unknown_upload`, `confirm_upload_reconciled`, `reconciled_version_name`, `reconciled_version_code`, `reconciled_artifact_sha256`, `reconciled_destinations`, and `reconciled_provider_state`. Leave reviewer and tag protection as an external, unverified repository setting.
 
 For `firebase-distribution`, keep Firebase credentials separate from Play credentials. Require a matching Firebase application and, for AAB delivery, a reviewed Play link plus `CONFIRM_FIREBASE_AAB_PLAY_LINKED=true`. An AAB link confirmation does not authorize a Play release.
 

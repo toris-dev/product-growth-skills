@@ -5479,6 +5479,9 @@ workflow_template() {
     rollout distribution_target firebase_artifact_type firebase_release_notes \
     confirm_firebase_package_match confirm_firebase_aab_play_linked \
     confirm_dual_delivery confirm_play_release_policy confirm_slack_notification \
+    retry_unknown_upload confirm_upload_reconciled reconciled_version_name \
+    reconciled_version_code reconciled_artifact_sha256 reconciled_destinations \
+    reconciled_provider_state \
     confirm_production
   do
     grep -E "^[[:space:]]{6}$input_name:" "$workflow" >/dev/null 2>&1 ||
@@ -5506,6 +5509,10 @@ expected_inputs = {
   "firebase_release_notes" => "string", "confirm_firebase_package_match" => "boolean",
   "confirm_firebase_aab_play_linked" => "boolean", "confirm_dual_delivery" => "boolean",
   "confirm_play_release_policy" => "boolean", "confirm_slack_notification" => "boolean",
+  "retry_unknown_upload" => "boolean", "confirm_upload_reconciled" => "boolean",
+  "reconciled_version_name" => "string", "reconciled_version_code" => "string",
+  "reconciled_artifact_sha256" => "string", "reconciled_destinations" => "string",
+  "reconciled_provider_state" => "string",
   "confirm_production" => "boolean"
 }
 raise "manual inputs differ from the contract" unless dispatch.keys.sort == expected_inputs.keys.sort
@@ -5552,10 +5559,27 @@ expected_mappings = {
   "VERSION_NAME" => "inputs.version_name", "TRACK" => "inputs.track",
   "RELEASE_STATUS" => "inputs.release_status", "DISTRIBUTION_TARGET" => "inputs.distribution_target",
   "RELEASE_TAG" => "github.event.release.tag_name",
-  "FIREBASE_RELEASE_NOTES" => "inputs.firebase_release_notes"
+  "FIREBASE_RELEASE_NOTES" => "inputs.firebase_release_notes",
+  "RETRY_UNKNOWN_UPLOAD" => "inputs.retry_unknown_upload",
+  "CONFIRM_UPLOAD_RECONCILED" => "inputs.confirm_upload_reconciled",
+  "RECONCILED_VERSION_NAME" => "inputs.reconciled_version_name",
+  "RECONCILED_VERSION_CODE" => "inputs.reconciled_version_code",
+  "RECONCILED_ARTIFACT_SHA256" => "inputs.reconciled_artifact_sha256",
+  "RECONCILED_DESTINATIONS" => "inputs.reconciled_destinations",
+  "RECONCILED_PROVIDER_STATE" => "inputs.reconciled_provider_state"
 }
 expected_mappings.each do |name, expression|
   raise "missing step-local mapping for #{name}" unless validation_env.fetch(name).include?(expression)
+end
+release_run = by_name.fetch("Release one routed Android artifact").fetch("run")
+%w[RETRY_UNKNOWN_UPLOAD CONFIRM_UPLOAD_RECONCILED RECONCILED_VERSION_NAME
+  RECONCILED_VERSION_CODE RECONCILED_ARTIFACT_SHA256 RECONCILED_DESTINATIONS
+  RECONCILED_PROVIDER_STATE].each do |name|
+  raise "release step does not forward #{name}" unless release_run.include?(name)
+end
+slack_run = by_name.fetch("Send the single optional Slack notification").fetch("run")
+unless slack_run.include?("retry_unknown") && slack_run.include?('== "false"')
+  raise "marked reconciliation retries must suppress workflow Slack notifications"
 end
 
 secret_uses = Hash.new { |hash, key| hash[key] = [] }
@@ -5652,6 +5676,13 @@ RUBY
     workflow_gate_confirm=$6
     workflow_gate_release_enabled=${7-true}
     workflow_gate_attempt=${8-1}
+    workflow_gate_retry=${9-false}
+    workflow_gate_reconciled=${10-false}
+    workflow_gate_reconciled_name=${11-}
+    workflow_gate_reconciled_code=${12-}
+    workflow_gate_reconciled_sha=${13-}
+    workflow_gate_reconciled_destinations=${14-}
+    workflow_gate_reconciled_state=${15-}
     workflow_gate_output=$workflow_harness/gate-$workflow_run_counter.output
     workflow_run_expect "$workflow_gate_description" "$workflow_gate_expected" \
       "$workflow_harness" "$workflow_harness/preflight.sh" \
@@ -5664,6 +5695,12 @@ RUBY
       CONFIRM_FIREBASE_PACKAGE_MATCH=false CONFIRM_FIREBASE_AAB_PLAY_LINKED=false \
       CONFIRM_DUAL_DELIVERY=false CONFIRM_PLAY_RELEASE_POLICY=false \
       CONFIRM_SLACK_NOTIFICATION=false \
+      RETRY_UNKNOWN_UPLOAD="$workflow_gate_retry" CONFIRM_UPLOAD_RECONCILED="$workflow_gate_reconciled" \
+      RECONCILED_VERSION_NAME="$workflow_gate_reconciled_name" \
+      RECONCILED_VERSION_CODE="$workflow_gate_reconciled_code" \
+      RECONCILED_ARTIFACT_SHA256="$workflow_gate_reconciled_sha" \
+      RECONCILED_DESTINATIONS="$workflow_gate_reconciled_destinations" \
+      RECONCILED_PROVIDER_STATE="$workflow_gate_reconciled_state" \
       CONFIRM_PRODUCTION="$workflow_gate_confirm"
     if [ "$workflow_gate_expected" -eq 0 ]; then
       grep -Fx "deployment_environment=$workflow_gate_route" "$workflow_gate_output" >/dev/null 2>&1 ||
@@ -5680,6 +5717,22 @@ RUBY
   workflow_gate_case 'nonproduction manual routing failed' 0 play-store-nonproduction workflow_dispatch beta false
   workflow_gate_case 'unconfirmed production was accepted' 1 '' workflow_dispatch production false
   workflow_gate_case 'confirmed production routing failed' 0 play-store-production workflow_dispatch production true
+  workflow_retry_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  workflow_gate_case 'exact reconciled retry was rejected' 0 play-store-nonproduction \
+    workflow_dispatch internal false true 1 true true v1.2.3 42 \
+    "$workflow_retry_sha" play-store not-delivered
+  workflow_gate_case 'unconfirmed reconciled retry was accepted' 1 '' \
+    workflow_dispatch internal false true 1 true false v1.2.3 42 \
+    "$workflow_retry_sha" play-store not-delivered
+  workflow_gate_case 'unmarked reconciliation tuple was accepted' 1 '' \
+    workflow_dispatch internal false true 1 false false v1.2.3 42 \
+    "$workflow_retry_sha" play-store not-delivered
+  workflow_gate_case 'oversized reconciled version code was accepted' 1 '' \
+    workflow_dispatch internal false true 1 true true v1.2.3 99999999999999999999 \
+    "$workflow_retry_sha" play-store not-delivered
+  workflow_gate_case 'reconciled version code above Play maximum was accepted' 1 '' \
+    workflow_dispatch internal false true 1 true true v1.2.3 2100000001 \
+    "$workflow_retry_sha" play-store not-delivered
 
   workflow_repo=$workflow_harness/repository
   mkdir -p "$workflow_repo"
@@ -5710,6 +5763,13 @@ RUBY
     workflow_validate_status=$7
     workflow_validate_target=$8
     workflow_validate_notes=$9
+    workflow_validate_retry=${10-false}
+    workflow_validate_reconciled=${11-false}
+    workflow_validate_reconciled_name=${12-}
+    workflow_validate_reconciled_code=${13-}
+    workflow_validate_reconciled_sha=${14-}
+    workflow_validate_reconciled_destinations=${15-}
+    workflow_validate_reconciled_state=${16-}
     workflow_validate_root=$workflow_harness/validate-$workflow_run_counter
     mkdir -p "$workflow_validate_root"
     workflow_run_expect "$workflow_validate_description" "$workflow_validate_expected" \
@@ -5723,6 +5783,13 @@ RUBY
       CONFIRM_FIREBASE_PACKAGE_MATCH=false CONFIRM_FIREBASE_AAB_PLAY_LINKED=false \
       CONFIRM_DUAL_DELIVERY=true CONFIRM_PLAY_RELEASE_POLICY=false \
       CONFIRM_SLACK_NOTIFICATION=false CONFIRM_PRODUCTION=false \
+      RETRY_UNKNOWN_UPLOAD="$workflow_validate_retry" \
+      CONFIRM_UPLOAD_RECONCILED="$workflow_validate_reconciled" \
+      RECONCILED_VERSION_NAME="$workflow_validate_reconciled_name" \
+      RECONCILED_VERSION_CODE="$workflow_validate_reconciled_code" \
+      RECONCILED_ARTIFACT_SHA256="$workflow_validate_reconciled_sha" \
+      RECONCILED_DESTINATIONS="$workflow_validate_reconciled_destinations" \
+      RECONCILED_PROVIDER_STATE="$workflow_validate_reconciled_state" \
       RELEASE_EVENT_SLACK_AUTHORIZED=false
     WORKFLOW_LAST_VALIDATE_ROOT=$workflow_validate_root
   }
@@ -5752,6 +5819,17 @@ RUBY
     'Firebase notes injection canary was not preserved as inert data'
   [ ! -e "$workflow_injection_marker" ] || fail 'Firebase notes injection canary executed'
 
+  workflow_validate_case 'exact retry tuple was not stored' 0 workflow_dispatch '' \
+    v2.0.0 internal completed play-store notes true true v2.0.0 42 \
+    "$workflow_retry_sha" play-store not-delivered
+  [ "$(cat "$WORKFLOW_LAST_VALIDATE_ROOT/flutter-play-store-release-inputs/retry_unknown")" = true ] ||
+    fail 'validated retry marker was not stored'
+  [ "$(cat "$WORKFLOW_LAST_VALIDATE_ROOT/flutter-play-store-release-inputs/reconciled_version_code")" = 42 ] ||
+    fail 'validated reconciliation version code was not stored'
+  workflow_validate_case 'validation accepted a reconciled version code above Play maximum' 1 \
+    workflow_dispatch '' v2.0.0 internal completed play-store notes true true v2.0.0 \
+    2100000001 "$workflow_retry_sha" play-store not-delivered
+
   workflow_shell_canary='$(touch '"$workflow_injection_marker"')'
   workflow_validate_case 'version injection was accepted' 1 workflow_dispatch '' \
     "v2.0.0$workflow_shell_canary" internal completed play-store notes
@@ -5761,6 +5839,9 @@ RUBY
     v2.0.0 internal "completed$workflow_shell_canary" play-store notes
   workflow_validate_case 'distribution target injection was accepted' 1 workflow_dispatch '' \
     v2.0.0 internal completed "both$workflow_shell_canary" notes
+  workflow_validate_case 'reconciled version code injection was accepted' 1 workflow_dispatch '' \
+    v2.0.0 internal completed play-store notes true true v2.0.0 \
+    "42$workflow_shell_canary" "$workflow_retry_sha" play-store not-delivered
   [ ! -e "$workflow_injection_marker" ] || fail 'workflow input injection canary executed'
   pass 'workflow_template'
 }
@@ -6394,6 +6475,10 @@ references/troubleshooting.md'
     'GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64' \
     'FIREBASE_SERVICE_ACCOUNT_JSON_BASE64' 'SLACK_WEBHOOK_URL' \
     'FIREBASE_APP_ID' 'FIREBASE_TESTER_GROUPS' 'FIREBASE_TESTERS' \
+    'RETRY_UNKNOWN_UPLOAD' 'CONFIRM_UPLOAD_RECONCILED' \
+    'RECONCILED_VERSION_NAME' 'RECONCILED_VERSION_CODE' \
+    'RECONCILED_ARTIFACT_SHA256' 'RECONCILED_DESTINATIONS' \
+    'RECONCILED_PROVIDER_STATE' \
     'gh secret set SECRET_NAME' 'RELEASE_RESULT_PATH' \
     'macOS' 'Linux' 'PowerShell' 'no-wrap Base64' \
     'Encoding is not encryption.' 'Play App Signing' 'upload key backup' \
@@ -6402,7 +6487,9 @@ references/troubleshooting.md'
     'test-app signing certificate' 'Slack failure must not mask' \
     'path > Base64 > default' 'type | context | default | precedence | secrecy | validation | owner' \
     'authentication' 'permissions' 'draft or new app' 'reused version code' \
-    'stale artifacts' 'Firebase Play link' 'CI runner and actions'
+    'stale artifacts' 'Firebase Play link' 'CI runner and actions' \
+    'exact lowercase string' 'unmarked fresh retry cannot' \
+    "GitHub.com's 25 top-level" 'newly built artifact SHA-256'
   do
     grep -F -- "$required_text" "$documentation_corpus" >/dev/null 2>&1 ||
       fail "documentation corpus does not contain: $required_text"

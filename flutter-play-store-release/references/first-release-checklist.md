@@ -119,6 +119,7 @@ APK delivery does not require the Play link. See [Play/Firebase linking](https:/
 - [ ] Select exactly one Slack notification owner and verify secrets do not enter payloads.
 - [ ] Keep Slack disabled by default; require a per-run confirmation or the separate documented release-event standing authorization.
 - [ ] Confirm Slack failure cannot mask the release result.
+- [ ] Confirm every `CONFIRM_*` authorization is the exact lowercase string `true`; do not accept truthy aliases.
 
 ## 11. Final automation preflight
 
@@ -129,6 +130,8 @@ APK delivery does not require the Play link. See [Play/Firebase linking](https:/
 - [ ] Confirm no concurrent upload can allocate the same code.
 - [ ] Confirm release status and rollout are valid; production is never the default.
 - [ ] Pin ordinary deploys to `completed` with no rollout; require exact lane options and separate confirmation for non-default policy.
+- [ ] For an unknown provider outcome, reject workflow reruns and require a fresh dispatch with all seven exact retry/reconciliation inputs.
+- [ ] Before a reconciled retry upload, require the allocated code and newly built artifact SHA-256 to equal the attested tuple.
 - [ ] Confirm release notes, testers/groups, notification flags, result path, and artifact type are ordinary configuration, not secrets.
 - [ ] Verify rollback and promotion are separate authorized actions.
 - [ ] Record missing console access, policy state, Environment protection, and provider permissions as not verified.

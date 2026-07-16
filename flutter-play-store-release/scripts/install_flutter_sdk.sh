@@ -20,7 +20,7 @@ usage() {
 Usage: install_flutter_sdk.sh --version VERSION --channel stable|beta \
   --architecture x64|arm64 --destination PATH [--manifest-url URL]
 USAGE
-  exit 2
+  exit "${1:-2}"
 }
 
 die() {
@@ -65,7 +65,7 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --help|-h)
-      usage
+      usage 0
       ;;
     *)
       usage

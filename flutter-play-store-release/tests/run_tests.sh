@@ -5291,6 +5291,19 @@ flutter_sdk_installer() {
   INSTALLER=$PACKAGE_ROOT/scripts/install_flutter_sdk.sh
   INSTALLER_ROOT=$TMP_ROOT/flutter-sdk-installer
   mkdir -p "$INSTALLER_ROOT/releases/stable/linux"
+
+  set +e
+  "$INSTALLER" --version >"$INSTALLER_ROOT/argument.stdout" \
+    2>"$INSTALLER_ROOT/argument.stderr"
+  installer_argument_status=$?
+  set -e
+  [ "$installer_argument_status" -eq 2 ] ||
+    fail "incomplete installer arguments did not return status 2"
+
+  installer_expect 'installer help did not exit successfully' 0 --help
+  grep -F 'Usage: install_flutter_sdk.sh' "$INSTALLER_ROOT/stderr" \
+    >/dev/null 2>&1 || fail 'installer help omitted usage text'
+
   good_archive=$INSTALLER_ROOT/releases/stable/linux/flutter_linux_3.38.1-stable.tar.xz
   installer_make_archive "$good_archive" good
   good_sha=$(installer_sha256 "$good_archive")

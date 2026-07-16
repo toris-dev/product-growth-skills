@@ -256,6 +256,12 @@ YAML
     | grep -Fx '  installation' >/dev/null 2>&1 ||
     fail 'default/all test dispatch omitted the installation group'
 
+  if grep -E '^[[:space:]]*set [+-]e([[:space:]]|$)' \
+    "$PACKAGE_ROOT/tests/run_tests.sh" >/dev/null 2>&1
+  then
+    fail 'test helpers must preserve the caller errexit state'
+  fi
+
   pass 'package_contract'
 }
 
@@ -5276,10 +5282,11 @@ installer_expect() {
   shift 2
   installer_stdout=$INSTALLER_ROOT/stdout
   installer_stderr=$INSTALLER_ROOT/stderr
-  set +e
-  FPRS_TEST_MODE=1 "$INSTALLER" "$@" >"$installer_stdout" 2>"$installer_stderr"
-  installer_status=$?
-  set -e
+  if FPRS_TEST_MODE=1 "$INSTALLER" "$@" >"$installer_stdout" 2>"$installer_stderr"; then
+    installer_status=0
+  else
+    installer_status=$?
+  fi
   if [ "$expected" -eq 0 ]; then
     [ "$installer_status" -eq 0 ] || {
       cat "$installer_stderr" >&2
@@ -5295,11 +5302,13 @@ flutter_sdk_installer() {
   INSTALLER_ROOT=$TMP_ROOT/flutter-sdk-installer
   mkdir -p "$INSTALLER_ROOT/releases/stable/linux"
 
-  set +e
-  "$INSTALLER" --version >"$INSTALLER_ROOT/argument.stdout" \
+  if "$INSTALLER" --version >"$INSTALLER_ROOT/argument.stdout" \
     2>"$INSTALLER_ROOT/argument.stderr"
-  installer_argument_status=$?
-  set -e
+  then
+    installer_argument_status=0
+  else
+    installer_argument_status=$?
+  fi
   [ "$installer_argument_status" -eq 2 ] ||
     fail "incomplete installer arguments did not return status 2"
 
@@ -5424,10 +5433,11 @@ flutter_sdk_installer() {
   done
   [ -e "$signal_marker" ] || fail 'signal test did not reach extracted version verification'
   kill -TERM "$installer_pid"
-  set +e
-  wait "$installer_pid"
-  installer_signal_status=$?
-  set -e
+  if wait "$installer_pid"; then
+    installer_signal_status=0
+  else
+    installer_signal_status=$?
+  fi
   [ "$installer_signal_status" -ne 0 ] || fail 'installer ignored TERM'
   [ ! -e "$INSTALLER_ROOT/signal-sdk" ] || fail 'signal left a destination behind'
   if find "$INSTALLER_ROOT" -maxdepth 1 -name '.flutter-sdk-install.*' -print | grep . >/dev/null 2>&1; then
@@ -5612,14 +5622,16 @@ RUBY
     workflow_run_script=$4
     shift 4
     workflow_run_counter=$((workflow_run_counter + 1))
-    set +e
-    (
+    if (
       CDPATH= cd -- "$workflow_run_directory" &&
         env "$@" bash "$workflow_run_script"
     ) >"$workflow_harness/run-$workflow_run_counter.stdout" \
       2>"$workflow_harness/run-$workflow_run_counter.stderr"
-    workflow_run_status=$?
-    set -e
+    then
+      workflow_run_status=0
+    else
+      workflow_run_status=$?
+    fi
     if [ "$workflow_run_expected" -eq 0 ]; then
       [ "$workflow_run_status" -eq 0 ] || {
         cat "$workflow_harness/run-$workflow_run_counter.stderr" >&2

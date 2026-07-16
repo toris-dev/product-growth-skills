@@ -6426,6 +6426,375 @@ installation() {
       fail "recovery journal remained after phase recovery: $installation_phase"
   done
 
+  for installation_phase in \
+    staged claude_old_moved agents_old_moved claude_new_installed \
+    agents_new_installed validated committed
+  do
+    case "$installation_phase" in
+      staged|claude_new_installed|committed) installation_signal_name=HUP ;;
+      claude_old_moved|agents_new_installed) installation_signal_name=INT ;;
+      *) installation_signal_name=TERM ;;
+    esac
+    signal_home="$INSTALLATION_ROOT/signal-home-$installation_phase"
+    mkdir -p "$signal_home"
+    HOME="$signal_home" "$PACKAGE_ROOT/install.sh" --source "$PACKAGE_ROOT" \
+      > /dev/null 2>&1 || fail "signal fixture install failed: $installation_phase"
+    env HOME="$signal_home" FPRS_TEST_MODE=1 \
+      FPRS_TEST_SIGNAL_INSTALL_PHASE="$installation_phase" \
+      FPRS_TEST_SIGNAL_NAME="$installation_signal_name" \
+      "$PACKAGE_ROOT/update.sh" --source "$INSTALLATION_RECOVERY_SOURCE" \
+      > /dev/null 2>&1
+    signal_status=$?
+    [ "$signal_status" -eq 3 ] ||
+      fail "catchable signal did not return status 3 at $installation_phase (got $signal_status)"
+    signal_claude="$signal_home/.claude/skills/flutter-play-store-release/README.md"
+    signal_agents="$signal_home/.agents/skills/flutter-play-store-release/README.md"
+    assert_same_file "$signal_claude" "$signal_agents" \
+      "catchable signal split installed copies: $installation_phase"
+    if [ "$installation_phase" = committed ]; then
+      assert_same_file "$INSTALLATION_RECOVERY_SOURCE/README.md" "$signal_claude" \
+        'committed signal did not preserve the new copies'
+    else
+      assert_same_file "$PACKAGE_ROOT/README.md" "$signal_claude" \
+        "pre-commit signal did not restore the old copies: $installation_phase"
+    fi
+  done
+
+  installation_expect_status() {
+    installation_expected_status=$1
+    installation_description=$2
+    shift 2
+    "$@" > "$INSTALLATION_ROOT/case.stdout" 2> "$INSTALLATION_ROOT/case.stderr"
+    installation_actual_status=$?
+    [ "$installation_actual_status" -eq "$installation_expected_status" ] || {
+      cat "$INSTALLATION_ROOT/case.stderr" >&2
+      fail "$installation_description (expected $installation_expected_status, got $installation_actual_status)"
+    }
+  }
+
+  # Source/destination boundaries and manifest grammar are refusal-only.
+  ln -s "$PACKAGE_ROOT" "$INSTALLATION_ROOT/source-link"
+  boundary_home="$INSTALLATION_ROOT/boundary-home"
+  mkdir -p "$boundary_home"
+  installation_expect_status 2 'source symlink was accepted' \
+    env HOME="$boundary_home" "$PACKAGE_ROOT/install.sh" --source "$INSTALLATION_ROOT/source-link"
+  overlap_source="$INSTALLATION_ROOT/overlap-source"
+  mkdir -p "$overlap_source"
+  cp -R "$PACKAGE_ROOT/." "$overlap_source/"
+  installation_expect_status 2 'source/destination overlap was accepted' \
+    env HOME="$overlap_source" "$PACKAGE_ROOT/install.sh" --source "$overlap_source"
+  self_home="$INSTALLATION_ROOT/self-home"
+  mkdir -p "$self_home"
+  HOME="$self_home" "$PACKAGE_ROOT/install.sh" --source "$PACKAGE_ROOT" > /dev/null 2>&1 ||
+    fail 'self-update fixture install failed'
+  installation_expect_status 2 'installed-copy self-update was accepted' \
+    env HOME="$self_home" "$PACKAGE_ROOT/update.sh" \
+    --source "$self_home/.claude/skills/flutter-play-store-release"
+  symlink_home="$INSTALLATION_ROOT/destination-symlink-home"
+  mkdir -p "$symlink_home/.claude/skills" "$symlink_home/unrelated"
+  ln -s "$symlink_home/unrelated" "$symlink_home/.claude/skills/flutter-play-store-release"
+  installation_expect_status 2 'destination symlink was accepted' \
+    env HOME="$symlink_home" "$PACKAGE_ROOT/install.sh" --source "$PACKAGE_ROOT"
+  unrelated_home="$INSTALLATION_ROOT/unrelated-destination-home"
+  mkdir -p "$unrelated_home/.agents/skills/flutter-play-store-release"
+  printf 'foreign\n' > "$unrelated_home/.agents/skills/flutter-play-store-release/foreign.txt"
+  installation_expect_status 2 'unrelated destination directory was accepted' \
+    env HOME="$unrelated_home" "$PACKAGE_ROOT/install.sh" --source "$PACKAGE_ROOT"
+
+  for manifest_case in missing malformed traversal duplicate
+  do
+    manifest_source="$INSTALLATION_ROOT/manifest-$manifest_case"
+    manifest_home="$INSTALLATION_ROOT/manifest-home-$manifest_case"
+    mkdir -p "$manifest_source" "$manifest_home"
+    cp -R "$PACKAGE_ROOT/." "$manifest_source/"
+    case "$manifest_case" in
+      missing)
+        grep -v '^\.skill-package-id$' "$manifest_source/install-manifest.txt" \
+          > "$manifest_source/install-manifest.new"
+        ;;
+      malformed)
+        printf 'README.md' > "$manifest_source/install-manifest.new"
+        ;;
+      traversal)
+        { printf '../escape\n'; cat "$manifest_source/install-manifest.txt"; } \
+          > "$manifest_source/install-manifest.new"
+        ;;
+      duplicate)
+        { cat "$manifest_source/install-manifest.txt"; printf 'README.md\n'; } |
+          LC_ALL=C sort > "$manifest_source/install-manifest.new"
+        ;;
+    esac
+    mv "$manifest_source/install-manifest.new" "$manifest_source/install-manifest.txt"
+    installation_expect_status 2 "invalid manifest was accepted: $manifest_case" \
+      env HOME="$manifest_home" "$PACKAGE_ROOT/install.sh" --source "$manifest_source"
+  done
+
+  for tree_case in receipt-mode unexpected-file unexpected-directory unexpected-symlink
+  do
+    tree_home="$INSTALLATION_ROOT/tree-home-$tree_case"
+    mkdir -p "$tree_home"
+    HOME="$tree_home" "$PACKAGE_ROOT/install.sh" --source "$PACKAGE_ROOT" > /dev/null 2>&1 ||
+      fail "tree fixture install failed: $tree_case"
+    tree_destination="$tree_home/.claude/skills/flutter-play-store-release"
+    case "$tree_case" in
+      receipt-mode) chmod 600 "$tree_destination/.skill-install-receipt" ;;
+      unexpected-file) printf 'unexpected\n' > "$tree_destination/unexpected.txt" ;;
+      unexpected-directory) mkdir "$tree_destination/unexpected" ;;
+      unexpected-symlink) ln -s README.md "$tree_destination/unexpected-link" ;;
+    esac
+    installation_expect_status 2 "unsafe installed tree was accepted: $tree_case" \
+      env HOME="$tree_home" "$PACKAGE_ROOT/update.sh" --source "$PACKAGE_ROOT"
+  done
+
+  # Dry-run is write-free, and an identical second install preserves the receipt inode.
+  dry_home="$INSTALLATION_ROOT/dry-home"
+  mkdir -p "$dry_home"
+  installation_expect_status 0 'install dry-run failed' \
+    env HOME="$dry_home" "$PACKAGE_ROOT/install.sh" --source "$PACKAGE_ROOT" --dry-run
+  [ ! -e "$dry_home/.claude" ] && [ ! -e "$dry_home/.agents" ] &&
+    [ ! -e "$dry_home/.flutter-play-store-release-install-state" ] ||
+    fail 'install dry-run wrote lifecycle state'
+  HOME="$dry_home" "$PACKAGE_ROOT/install.sh" --source "$PACKAGE_ROOT" > /dev/null 2>&1 ||
+    fail 'idempotency fixture install failed'
+  dry_receipt="$dry_home/.claude/skills/flutter-play-store-release/.skill-install-receipt"
+  if dry_inode=$(stat -f '%i' "$dry_receipt" 2>/dev/null); then :;
+  else dry_inode=$(stat -c '%i' "$dry_receipt") || fail 'could not read receipt inode'; fi
+  HOME="$dry_home" "$PACKAGE_ROOT/install.sh" --source "$PACKAGE_ROOT" > /dev/null 2>&1 ||
+    fail 'idempotent install failed'
+  if dry_inode_after=$(stat -f '%i' "$dry_receipt" 2>/dev/null); then :;
+  else dry_inode_after=$(stat -c '%i' "$dry_receipt") || fail 'could not reread receipt inode'; fi
+  [ "$dry_inode" = "$dry_inode_after" ] || fail 'idempotent install replaced an unchanged copy'
+  installation_expect_status 0 'update dry-run failed' \
+    env HOME="$dry_home" "$PACKAGE_ROOT/update.sh" \
+    --source "$INSTALLATION_RECOVERY_SOURCE" --dry-run
+  assert_same_file "$PACKAGE_ROOT/README.md" \
+    "$dry_home/.claude/skills/flutter-play-store-release/README.md" \
+    'update dry-run changed an installed copy'
+  installation_expect_status 0 'uninstall dry-run failed' \
+    env HOME="$dry_home" "$PACKAGE_ROOT/uninstall.sh" --dry-run
+  [ -d "$dry_home/.claude/skills/flutter-play-store-release" ] ||
+    fail 'uninstall dry-run removed an installed copy'
+
+  # Same-host lock ownership: dead and PID-reused owners are reclaimable;
+  # foreign-host and a live matching owner are refused.
+  installation_host=$(hostname) || fail 'could not determine test hostname'
+  for lock_case in dead reused foreign
+  do
+    lock_home="$INSTALLATION_ROOT/lock-home-$lock_case"
+    lock_root="$lock_home/.flutter-play-store-release-install-state"
+    mkdir -p "$lock_root/lock"
+    chmod 700 "$lock_root" "$lock_root/lock"
+    lock_pid=999999
+    lock_host=$installation_host
+    [ "$lock_case" = reused ] && lock_pid=$$
+    [ "$lock_case" = foreign ] && { lock_pid=$$; lock_host=foreign.invalid; }
+    printf '%s\n' \
+      'schema_version=1' \
+      'token=0123456789abcdef0123456789abcdef' \
+      "host=$lock_host" \
+      "pid=$lock_pid" \
+      'process_identity=darwin-libproc-start:1:1' \
+      > "$lock_root/lock/owner"
+    chmod 600 "$lock_root/lock/owner"
+    if [ "$lock_case" = foreign ]; then
+      installation_expect_status 2 'foreign-host lock was reclaimed' \
+        env HOME="$lock_home" "$PACKAGE_ROOT/install.sh" --source "$PACKAGE_ROOT"
+    else
+      installation_expect_status 0 "same-host stale lock was not reclaimed: $lock_case" \
+        env HOME="$lock_home" "$PACKAGE_ROOT/install.sh" --source "$PACKAGE_ROOT"
+    fi
+  done
+
+  contention_home="$INSTALLATION_ROOT/contention-home"
+  contention_control="$INSTALLATION_ROOT/contention-control"
+  mkdir -p "$contention_home" "$contention_control"
+  HOME="$contention_home" "$PACKAGE_ROOT/install.sh" --source "$PACKAGE_ROOT" > /dev/null 2>&1 ||
+    fail 'contention fixture install failed'
+  env HOME="$contention_home" FPRS_TEST_MODE=1 \
+    FPRS_TEST_CONTROL_DIR="$contention_control" FPRS_TEST_PAUSE_INSTALL_PHASE=staged \
+    "$PACKAGE_ROOT/update.sh" --source "$INSTALLATION_RECOVERY_SOURCE" \
+    > "$INSTALLATION_ROOT/contention-worker.stdout" \
+    2> "$INSTALLATION_ROOT/contention-worker.stderr" &
+  contention_pid=$!
+  contention_wait=0
+  while [ ! -f "$contention_control/staged.ready" ] && [ "$contention_wait" -lt 300 ]
+  do
+    sleep 0.01
+    contention_wait=$((contention_wait + 1))
+  done
+  [ -f "$contention_control/staged.ready" ] || fail 'contention worker did not reach staged phase'
+  installation_expect_status 2 'live lifecycle lock was not refused' \
+    env HOME="$contention_home" "$PACKAGE_ROOT/update.sh" --source "$INSTALLATION_RECOVERY_SOURCE"
+  kill -TERM "$contention_pid" || fail 'could not signal lifecycle entrypoint'
+  wait "$contention_pid"
+  contention_status=$?
+  [ "$contention_status" -eq 3 ] ||
+    fail "entrypoint signal forwarding returned $contention_status instead of 3"
+  assert_same_file "$PACKAGE_ROOT/README.md" \
+    "$contention_home/.claude/skills/flutter-play-store-release/README.md" \
+    'entrypoint signal did not restore the prior Claude copy'
+
+  # Uninstall accepts absent, one-sided, identical, and independently valid
+  # divergent copies, while rename failures and signals preserve atomic state.
+  absent_home="$INSTALLATION_ROOT/uninstall-absent-home"
+  mkdir -p "$absent_home"
+  installation_expect_status 0 'absent uninstall was not idempotent' \
+    env HOME="$absent_home" "$PACKAGE_ROOT/uninstall.sh" --yes
+  for uninstall_case in identical one-sided divergent
+  do
+    uninstall_home="$INSTALLATION_ROOT/uninstall-home-$uninstall_case"
+    mkdir -p "$uninstall_home"
+    HOME="$uninstall_home" "$PACKAGE_ROOT/install.sh" --source "$PACKAGE_ROOT" > /dev/null 2>&1 ||
+      fail "uninstall fixture install failed: $uninstall_case"
+    if [ "$uninstall_case" = one-sided ]; then
+      rm -rf "$uninstall_home/.agents/skills/flutter-play-store-release"
+    elif [ "$uninstall_case" = divergent ]; then
+      divergent_home="$INSTALLATION_ROOT/divergent-source-home"
+      mkdir -p "$divergent_home"
+      HOME="$divergent_home" "$PACKAGE_ROOT/install.sh" --source "$INSTALLATION_RECOVERY_SOURCE" \
+        > /dev/null 2>&1 || fail 'divergent fixture install failed'
+      rm -rf "$uninstall_home/.agents/skills/flutter-play-store-release"
+      mv "$divergent_home/.agents/skills/flutter-play-store-release" \
+        "$uninstall_home/.agents/skills/flutter-play-store-release"
+    fi
+    installation_expect_status 0 "verified uninstall failed: $uninstall_case" \
+      env HOME="$uninstall_home" "$PACKAGE_ROOT/uninstall.sh" --yes
+    [ ! -e "$uninstall_home/.claude/skills/flutter-play-store-release" ] &&
+      [ ! -e "$uninstall_home/.agents/skills/flutter-play-store-release" ] ||
+      fail "uninstall left a canonical destination: $uninstall_case"
+  done
+
+  for uninstall_role in claude agents
+  do
+    rename_home="$INSTALLATION_ROOT/uninstall-rename-$uninstall_role"
+    mkdir -p "$rename_home"
+    HOME="$rename_home" "$PACKAGE_ROOT/install.sh" --source "$PACKAGE_ROOT" > /dev/null 2>&1 ||
+      fail "rename fixture install failed: $uninstall_role"
+    installation_expect_status 3 "uninstall rename failure did not roll back: $uninstall_role" \
+      env HOME="$rename_home" FPRS_TEST_MODE=1 \
+      FPRS_TEST_FAIL_UNINSTALL_SWAP="$uninstall_role" "$PACKAGE_ROOT/uninstall.sh" --yes
+    [ -d "$rename_home/.claude/skills/flutter-play-store-release" ] &&
+      [ -d "$rename_home/.agents/skills/flutter-play-store-release" ] ||
+      fail "uninstall rename failure split destinations: $uninstall_role"
+  done
+
+  for uninstall_phase in planned claude_quarantined agents_quarantined committed cleanup_complete
+  do
+    case "$uninstall_phase" in
+      planned|committed) uninstall_signal_name=HUP ;;
+      claude_quarantined|cleanup_complete) uninstall_signal_name=INT ;;
+      *) uninstall_signal_name=TERM ;;
+    esac
+    uninstall_signal_home="$INSTALLATION_ROOT/uninstall-signal-$uninstall_phase"
+    mkdir -p "$uninstall_signal_home"
+    HOME="$uninstall_signal_home" "$PACKAGE_ROOT/install.sh" --source "$PACKAGE_ROOT" \
+      > /dev/null 2>&1 || fail "uninstall signal fixture failed: $uninstall_phase"
+    installation_expect_status 3 "uninstall signal status changed: $uninstall_phase" \
+      env HOME="$uninstall_signal_home" FPRS_TEST_MODE=1 \
+      FPRS_TEST_SIGNAL_INSTALL_PHASE="$uninstall_phase" \
+      FPRS_TEST_SIGNAL_NAME="$uninstall_signal_name" "$PACKAGE_ROOT/uninstall.sh" --yes
+    if [ "$uninstall_phase" = committed ] || [ "$uninstall_phase" = cleanup_complete ]; then
+      [ ! -e "$uninstall_signal_home/.claude/skills/flutter-play-store-release" ] &&
+        [ ! -e "$uninstall_signal_home/.agents/skills/flutter-play-store-release" ] ||
+        fail "committed uninstall signal restored a destination: $uninstall_phase"
+    else
+      [ -d "$uninstall_signal_home/.claude/skills/flutter-play-store-release" ] &&
+        [ -d "$uninstall_signal_home/.agents/skills/flutter-play-store-release" ] ||
+        fail "pre-commit uninstall signal split destinations: $uninstall_phase"
+    fi
+  done
+
+  for cleanup_role in claude agents
+  do
+    cleanup_home="$INSTALLATION_ROOT/uninstall-cleanup-$cleanup_role"
+    mkdir -p "$cleanup_home"
+    HOME="$cleanup_home" "$PACKAGE_ROOT/install.sh" --source "$PACKAGE_ROOT" > /dev/null 2>&1 ||
+      fail "cleanup fixture install failed: $cleanup_role"
+    env HOME="$cleanup_home" FPRS_TEST_MODE=1 \
+      FPRS_TEST_FAIL_UNINSTALL_CLEANUP="$cleanup_role" \
+      "$PACKAGE_ROOT/uninstall.sh" --yes > /dev/null 2>&1
+    cleanup_status=$?
+    [ "$cleanup_status" -ne 0 ] || fail "cleanup failure was ignored: $cleanup_role"
+    [ ! -e "$cleanup_home/.claude/skills/flutter-play-store-release" ] &&
+      [ ! -e "$cleanup_home/.agents/skills/flutter-play-store-release" ] ||
+      fail "post-commit cleanup failure restored destinations: $cleanup_role"
+    installation_expect_status 0 "cleanup recovery failed: $cleanup_role" \
+      env HOME="$cleanup_home" "$PACKAGE_ROOT/uninstall.sh" --yes
+  done
+
+  for uninstall_kill_phase in \
+    planned claude_quarantined agents_quarantined committed cleanup_complete
+  do
+    kill_home="$INSTALLATION_ROOT/uninstall-kill-$uninstall_kill_phase"
+    mkdir -p "$kill_home"
+    HOME="$kill_home" "$PACKAGE_ROOT/install.sh" --source "$PACKAGE_ROOT" \
+      > /dev/null 2>&1 || fail "uninstall kill fixture failed: $uninstall_kill_phase"
+    env HOME="$kill_home" FPRS_TEST_MODE=1 \
+      FPRS_TEST_KILL_INSTALL_PHASE="$uninstall_kill_phase" \
+      "$PACKAGE_ROOT/uninstall.sh" --yes > /dev/null 2>&1
+    kill_status=$?
+    [ "$kill_status" -ne 0 ] || fail "uninstall kill phase completed: $uninstall_kill_phase"
+    installation_expect_status 2 "uninstall kill recovery failed: $uninstall_kill_phase" \
+      env HOME="$kill_home" "$PACKAGE_ROOT/update.sh" --source "$INSTALLATION_ROOT/missing-source"
+    if [ "$uninstall_kill_phase" = committed ] ||
+      [ "$uninstall_kill_phase" = cleanup_complete ]
+    then
+      [ ! -e "$kill_home/.claude/skills/flutter-play-store-release" ] &&
+        [ ! -e "$kill_home/.agents/skills/flutter-play-store-release" ] ||
+        fail "committed uninstall kill restored a destination: $uninstall_kill_phase"
+    else
+      [ -d "$kill_home/.claude/skills/flutter-play-store-release" ] &&
+        [ -d "$kill_home/.agents/skills/flutter-play-store-release" ] ||
+        fail "pre-commit uninstall kill did not restore both copies: $uninstall_kill_phase"
+    fi
+    [ ! -e "$kill_home/.flutter-play-store-release-install-state/transaction" ] ||
+      fail "uninstall recovery retained its journal: $uninstall_kill_phase"
+  done
+
+  for journal_case in unknown duplicate transaction-id path basename mode
+  do
+    journal_home="$INSTALLATION_ROOT/journal-home-$journal_case"
+    mkdir -p "$journal_home"
+    HOME="$journal_home" "$PACKAGE_ROOT/install.sh" --source "$PACKAGE_ROOT" \
+      > /dev/null 2>&1 || fail "journal fixture install failed: $journal_case"
+    env HOME="$journal_home" FPRS_TEST_MODE=1 FPRS_TEST_KILL_INSTALL_PHASE=staged \
+      "$PACKAGE_ROOT/update.sh" --source "$INSTALLATION_RECOVERY_SOURCE" \
+      > /dev/null 2>&1
+    journal_status=$?
+    [ "$journal_status" -ne 0 ] || fail "journal fixture was not interrupted: $journal_case"
+    journal_path="$journal_home/.flutter-play-store-release-install-state/transaction"
+    [ -f "$journal_path" ] || fail "journal fixture is missing: $journal_case"
+    case "$journal_case" in
+      unknown) printf 'unknown_key=value\n' >> "$journal_path" ;;
+      duplicate) printf 'schema_version=1\n' >> "$journal_path" ;;
+      transaction-id)
+        awk '/^transaction_id=/{print "transaction_id=bad"; next} {print}' \
+          "$journal_path" > "$journal_path.new"
+        mv "$journal_path.new" "$journal_path"
+        chmod 600 "$journal_path"
+        ;;
+      path)
+        awk '/^claude_stage=/{print "claude_stage=/tmp/not-owned"; next} {print}' \
+          "$journal_path" > "$journal_path.new"
+        mv "$journal_path.new" "$journal_path"
+        chmod 600 "$journal_path"
+        ;;
+      basename)
+        awk '/^agents_rollback=/{sub(/\.rollback$/, ".other")} {print}' \
+          "$journal_path" > "$journal_path.new"
+        mv "$journal_path.new" "$journal_path"
+        chmod 600 "$journal_path"
+        ;;
+      mode) chmod 644 "$journal_path" ;;
+    esac
+    installation_expect_status 2 "tampered journal was accepted: $journal_case" \
+      env HOME="$journal_home" "$PACKAGE_ROOT/update.sh" --source "$INSTALLATION_RECOVERY_SOURCE"
+    assert_same_file "$PACKAGE_ROOT/README.md" \
+      "$journal_home/.claude/skills/flutter-play-store-release/README.md" \
+      "tampered journal mutated the canonical destination: $journal_case"
+    [ -e "$journal_path" ] || fail "tampered journal evidence was deleted: $journal_case"
+  done
+
   pass 'installation'
 }
 

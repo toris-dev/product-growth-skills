@@ -12,7 +12,11 @@ fprs_package_sync_main() {
     printf 'ERROR: Python 3 is required for the package lifecycle\n' >&2
     return 1
   fi
-  python3 - "$@" <<'PY'
+  fprs_package_sync_old_hup=$(trap -p HUP)
+  fprs_package_sync_old_int=$(trap -p INT)
+  fprs_package_sync_old_term=$(trap -p TERM)
+  FPRS_PACKAGE_SYNC_SIGNALLED=0
+  python3 - "$@" <<'PY' &
 import contextlib
 import ctypes
 import errno
@@ -20,6 +24,7 @@ import hashlib
 import os
 import re
 import shutil
+import signal
 import socket
 import stat
 import sys
@@ -67,6 +72,18 @@ class Refusal(LifecycleError):
 
 class TransactionError(LifecycleError):
     status = 3
+
+
+class LifecycleSignal(BaseException):
+    pass
+
+
+def caught_signal(signum, frame):
+    raise LifecycleSignal(signum)
+
+
+for caught in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(caught, caught_signal)
 
 
 def load_atomic_rename():
@@ -441,15 +458,51 @@ def parse_key_file(path, expected_keys):
 
 
 def process_identity(pid):
-    proc_stat = "/proc/%d/stat" % pid
-    try:
-        with open(proc_stat, "r", encoding="ascii") as source:
-            fields = source.read().split()
-        if len(fields) >= 22:
-            return "proc-start-" + fields[21]
-    except (OSError, UnicodeError):
-        pass
-    return "pid-%d" % pid
+    if sys.platform.startswith("linux"):
+        try:
+            with open("/proc/%d/stat" % pid, "r", encoding="ascii") as source:
+                raw = source.read().strip()
+            closing = raw.rfind(")")
+            fields = raw[closing + 2:].split() if closing >= 0 else []
+            start_ticks = fields[19] if len(fields) > 19 else ""
+            if re.match(r"^[0-9]+$", start_ticks):
+                return "linux-proc-start:" + start_ticks
+        except (OSError, UnicodeError):
+            return None
+    elif sys.platform == "darwin":
+        try:
+            fields = [
+                ("flags", ctypes.c_uint32), ("status", ctypes.c_uint32),
+                ("xstatus", ctypes.c_uint32), ("pid", ctypes.c_uint32),
+                ("ppid", ctypes.c_uint32), ("uid", ctypes.c_uint32),
+                ("gid", ctypes.c_uint32), ("ruid", ctypes.c_uint32),
+                ("rgid", ctypes.c_uint32), ("svuid", ctypes.c_uint32),
+                ("svgid", ctypes.c_uint32), ("rfu", ctypes.c_uint32),
+                ("comm", ctypes.c_char * 16), ("name", ctypes.c_char * 32),
+                ("nfiles", ctypes.c_uint32), ("pgid", ctypes.c_uint32),
+                ("pjobc", ctypes.c_uint32), ("tdev", ctypes.c_uint32),
+                ("tpgid", ctypes.c_uint32), ("nice", ctypes.c_int32),
+                ("start_sec", ctypes.c_uint64), ("start_usec", ctypes.c_uint64),
+            ]
+            bsd_info_type = type("ProcBsdInfo", (ctypes.Structure,), {"_fields_": fields})
+            library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+            operation = library.proc_pidinfo
+            operation.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+            operation.restype = ctypes.c_int
+            info = bsd_info_type()
+            copied = operation(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info))
+            if copied == ctypes.sizeof(info) and info.pid == pid and info.start_sec > 0:
+                return "darwin-libproc-start:%d:%d" % (info.start_sec, info.start_usec)
+        except (AttributeError, OSError):
+            return None
+    return None
+
+
+def valid_process_identity(value):
+    return bool(
+        re.match(r"^linux-proc-start:[0-9]+$", value) or
+        re.match(r"^darwin-libproc-start:[0-9]+:[0-9]+$", value)
+    )
 
 
 class LifecycleLock:
@@ -467,6 +520,9 @@ class LifecycleLock:
             refuse("lifecycle state contains unexpected entries; inspect %s" % self.state_root)
 
     def acquire(self):
+        owner_identity = process_identity(os.getpid())
+        if owner_identity is None:
+            raise LifecycleError("cannot prove lifecycle process identity; manually inspect %s" % self.state_root)
         if lstat(self.state_root) is None:
             os.mkdir(self.state_root, 0o700)
         self.validate_state()
@@ -484,7 +540,7 @@ class LifecycleLock:
             "host=%s\n"
             "pid=%d\n"
             "process_identity=%s\n"
-        ) % (self.token, socket.gethostname(), os.getpid(), process_identity(os.getpid()))
+        ) % (self.token, socket.gethostname(), os.getpid(), owner_identity)
         descriptor = os.open(owner_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
             os.write(descriptor, owner.encode("utf-8"))
@@ -501,6 +557,8 @@ class LifecycleLock:
             ["schema_version", "token", "host", "pid", "process_identity"])
         if owner["schema_version"] != "1" or owner["host"] != socket.gethostname():
             refuse("lifecycle lock ownership cannot be proved; inspect %s" % self.path)
+        if not valid_process_identity(owner["process_identity"]):
+            refuse("lifecycle lock process identity is invalid; inspect %s" % self.path)
         try:
             pid = int(owner["pid"])
             if pid <= 0:
@@ -514,7 +572,12 @@ class LifecycleLock:
             return
         except PermissionError:
             refuse("lifecycle lock process cannot be checked; inspect %s" % self.path)
-        refuse("another package lifecycle operation is running (PID %d)" % pid)
+        live_identity = process_identity(pid)
+        if live_identity is None:
+            refuse("lifecycle lock process identity cannot be proved; inspect %s" % self.path)
+        if live_identity == owner["process_identity"]:
+            refuse("another package lifecycle operation is running (PID %d)" % pid)
+        shutil.rmtree(self.path)
 
     def release(self):
         if not self.held:
@@ -642,6 +705,12 @@ def checkpoint(record, path):
             time.sleep(0.01)
     if os.environ.get("FPRS_TEST_KILL_INSTALL_PHASE") == phase:
         os.kill(os.getpid(), 9)
+    if os.environ.get("FPRS_TEST_SIGNAL_INSTALL_PHASE") == phase:
+        signal_name = os.environ.get("FPRS_TEST_SIGNAL_NAME", "TERM")
+        signal_number = {"HUP": signal.SIGHUP, "INT": signal.SIGINT, "TERM": signal.SIGTERM}.get(signal_name)
+        if signal_number is None:
+            raise TransactionError("invalid injected lifecycle signal")
+        os.kill(os.getpid(), signal_number)
     if os.environ.get("FPRS_TEST_FAIL_INSTALL_PHASE") == phase:
         raise TransactionError("injected lifecycle failure after %s" % phase)
 
@@ -814,7 +883,7 @@ def synchronize(operation, source, metadata, destinations, journal_path):
         if is_present(journal_path):
             saved = journal_read(journal_path, destinations)
             if saved["phase"] == "committed":
-                raise LifecycleError("%s committed but cleanup is incomplete; rerun to recover" % operation) from error
+                raise TransactionError("%s committed; new copies were preserved and cleanup will resume on the next invocation" % operation) from error
             try:
                 recover_install_precommit(saved, journal_path)
             except BaseException as recovery_error:
@@ -853,7 +922,7 @@ def uninstall(destinations, journal_path):
         if is_present(journal_path):
             saved = journal_read(journal_path, destinations)
             if saved["phase"] in ("committed", "cleanup_complete"):
-                raise LifecycleError("uninstall committed but cleanup is incomplete; rerun to recover") from error
+                raise TransactionError("uninstall committed; absent destinations were preserved and cleanup will resume on the next invocation") from error
             try:
                 recover_uninstall_precommit(saved, journal_path)
             except BaseException as recovery_error:
@@ -920,8 +989,29 @@ except LifecycleError as error:
 except KeyboardInterrupt:
     print("ERROR: package lifecycle was interrupted", file=sys.stderr)
     raise SystemExit(3)
+except LifecycleSignal:
+    print("ERROR: package lifecycle was interrupted", file=sys.stderr)
+    raise SystemExit(3)
 except Exception as error:
     print("ERROR: package lifecycle failed: %s" % error, file=sys.stderr)
     raise SystemExit(1)
 PY
+  FPRS_PACKAGE_SYNC_CHILD_PID=$!
+  trap 'FPRS_PACKAGE_SYNC_SIGNALLED=1; kill -HUP "$FPRS_PACKAGE_SYNC_CHILD_PID" 2>/dev/null || true' HUP
+  trap 'FPRS_PACKAGE_SYNC_SIGNALLED=1; kill -INT "$FPRS_PACKAGE_SYNC_CHILD_PID" 2>/dev/null || true' INT
+  trap 'FPRS_PACKAGE_SYNC_SIGNALLED=1; kill -TERM "$FPRS_PACKAGE_SYNC_CHILD_PID" 2>/dev/null || true' TERM
+  while :
+  do
+    wait "$FPRS_PACKAGE_SYNC_CHILD_PID"
+    fprs_package_sync_status=$?
+    if [ "$FPRS_PACKAGE_SYNC_SIGNALLED" -eq 1 ] && [ "$fprs_package_sync_status" -ge 128 ]; then
+      continue
+    fi
+    break
+  done
+  if [ -n "$fprs_package_sync_old_hup" ]; then eval "$fprs_package_sync_old_hup"; else trap - HUP; fi
+  if [ -n "$fprs_package_sync_old_int" ]; then eval "$fprs_package_sync_old_int"; else trap - INT; fi
+  if [ -n "$fprs_package_sync_old_term" ]; then eval "$fprs_package_sync_old_term"; else trap - TERM; fi
+  unset FPRS_PACKAGE_SYNC_CHILD_PID FPRS_PACKAGE_SYNC_SIGNALLED
+  return "$fprs_package_sync_status"
 }

@@ -6331,6 +6331,36 @@ references/troubleshooting.md'
   pass 'documentation'
 }
 
+repository_integration() {
+  repository_root=$(CDPATH= cd -- "$PACKAGE_ROOT/.." && pwd)
+  repository_readme=$repository_root/README.md
+  repository_validator=$repository_root/scripts/validate_skills.py
+
+  [ -f "$repository_readme" ] || fail 'repository README is missing'
+  [ -f "$repository_validator" ] || fail 'repository validator is missing'
+
+  for expected_text in \
+    'packages seven reusable agent skills' \
+    '[`flutter-play-store-release`](flutter-play-store-release/)' \
+    'expo-interactive-design flutter-play-store-release; do' \
+    'Use $flutter-play-store-release' \
+    '├── flutter-play-store-release/' \
+    'bash flutter-play-store-release/tests/run_tests.sh'
+  do
+    grep -F -- "$expected_text" "$repository_readme" >/dev/null 2>&1 ||
+      fail "repository README does not contain: $expected_text"
+  done
+
+  if ! repository_validation=$(python3 "$repository_validator" 2>&1); then
+    printf '%s\n' "$repository_validation" >&2
+    fail 'repository validator rejected the seven-skill collection'
+  fi
+  [ "$repository_validation" = 'Validated 7 skills successfully.' ] ||
+    fail 'repository validator did not report exactly seven skills'
+
+  pass 'repository_integration'
+}
+
 installation() {
   INSTALLATION_ROOT="$TMP_ROOT/installation"
   INSTALLATION_HOME="$INSTALLATION_ROOT/home"
@@ -6812,6 +6842,7 @@ run_test_group() {
     workflow_template) workflow_template ;;
     release_validator) release_validator ;;
     documentation) documentation ;;
+    repository_integration) repository_integration ;;
     installation) installation ;;
     *) fail "unknown test group: $1" ;;
   esac
@@ -6831,6 +6862,7 @@ if [ "$#" -eq 0 ] || [ "${1-}" = all ]; then
   workflow_template
   release_validator
   documentation
+  repository_integration
 else
   for requested_group in "$@"
   do

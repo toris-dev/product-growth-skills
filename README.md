@@ -1,8 +1,8 @@
 # Product Growth Skills
 
-> Open-source agent skills for app-store growth, web SEO/GEO, Flutter and Expo Android performance, and interactive 2D/3D product design.
+> Open-source agent skills for app-store growth, web SEO/GEO, Flutter and Expo Android performance, Flutter Play Store delivery, and interactive 2D/3D product design.
 
-This repository packages six reusable agent skills for product-growth work across the web and mobile apps. They cover search visibility, app-store conversion, Android performance, and interactive Flutter and Expo design.
+This repository packages seven reusable agent skills for product-growth work across the web and mobile apps. They cover search visibility, app-store conversion, Android performance, Flutter Play Store release automation, and interactive Flutter and Expo design.
 
 Each skill follows an evidence-driven workflow instead of acting as a generic checklist:
 
@@ -17,6 +17,7 @@ inspect context → gather evidence → choose scope → create or implement →
 | [`app-store-listing-creator`](app-store-listing-creator/) | Creates Play Store and App Store icon directions, image-generation prompts, screenshot storyboards, short and full descriptions, keyword strategy, and localization notes | Launching or relaunching an app, improving store conversion, or preparing listing assets |
 | [`seo-geo-optimizer`](seo-geo-optimizer/) | Audits technical SEO, search intent, keyword maps, structured data, internal links, GEO, and `llms.txt` | Launching, migrating, or auditing a website and improving search or AI-answer discoverability |
 | [`flutter-android-performance`](flutter-android-performance/) | Measures and optimizes startup, frames and jank, CPU, memory, network, assets, and app size | Investigating Flutter Android regressions or preparing a release performance review |
+| [`flutter-play-store-release`](flutter-play-store-release/) | Inspects, configures, validates, repairs, builds, and safely operates Flutter Android delivery with Fastlane and GitHub Actions | Preparing Google Play delivery, Firebase App Distribution, Slack notifications, or Android release automation |
 | [`flutter-interactive-design`](flutter-interactive-design/) | Designs responsive Flutter UI, gesture-driven 2D motion, shaders, bounded 3D, and accessible performance fallbacks | Building screens, onboarding, visualizations, games, or immersive interactions |
 | [`expo-android-performance`](expo-android-performance/) | Optimizes Expo across JavaScript, UI, and native boundaries while respecting prebuild ownership | Investigating Expo Android startup, rendering, lists, memory, bundle, or package size |
 | [`expo-interactive-design`](expo-interactive-design/) | Builds native Expo UI, routing and gestures, 2D canvas or motion, bounded 3D, and Android fallbacks | Designing screens, transitions, visualizations, or immersive Expo experiences |
@@ -30,7 +31,7 @@ Every skill folder is independently invocable. Copy or symlink the repository, o
 ```bash
 git clone https://github.com/toris-dev/product-growth-skills.git
 mkdir -p ~/.codex/skills
-for skill in app-store-listing-creator seo-geo-optimizer flutter-android-performance flutter-interactive-design expo-android-performance expo-interactive-design; do
+for skill in app-store-listing-creator seo-geo-optimizer flutter-android-performance flutter-interactive-design expo-android-performance expo-interactive-design flutter-play-store-release; do
   ln -s "$(pwd)/product-growth-skills/$skill" "$HOME/.codex/skills/$skill"
 done
 ```
@@ -45,7 +46,14 @@ cp -R product-growth-skills/seo-geo-optimizer ~/.codex/skills/
 cp -R product-growth-skills/shared-references ~/.codex/skills/
 ```
 
-The skills refer to `shared-references/` through a relative path. When copying a single skill, place the shared folder under the same parent directory as shown above. Cloning the repository and linking selected skill folders is the safest way to preserve this structure.
+The original six skills refer to `shared-references/` through a relative path. When copying one of them, place the shared folder under the same parent directory as shown above. Cloning the repository and linking selected skill folders is the safest way to preserve this structure.
+
+The standalone `flutter-play-store-release` package carries its own execution policy and lifecycle installer. From a trusted checkout, preview and then copy its verified runtime files into the supported global skill directories:
+
+```bash
+./product-growth-skills/flutter-play-store-release/install.sh --dry-run
+./product-growth-skills/flutter-play-store-release/install.sh
+```
 
 Start a new Codex task and invoke a skill explicitly with `$skill-name`. Other agents may understand `SKILL.md`, but installation locations and implicit invocation behavior differ by product.
 
@@ -75,6 +83,10 @@ verify the rendered result, and report remaining external-console actions.
 Use $flutter-android-performance to reproduce this Android performance issue,
 capture a profile/release baseline, implement the evidenced fix, rerun the same
 scenario, and report comparable measurements.
+
+Use $flutter-play-store-release to inspect this Flutter app, configure the
+smallest safe Android release path, validate it without uploading, and report
+the exact Google Play, Firebase, GitHub, or Slack actions that still require me.
 
 Use $flutter-interactive-design to inspect this app and implement a complete
 vertical slice with a distinctive visual direction, purposeful 2D/3D interaction,
@@ -116,6 +128,7 @@ product-growth-skills/
 ├── app-store-listing-creator/
 ├── seo-geo-optimizer/
 ├── flutter-android-performance/
+├── flutter-play-store-release/
 ├── flutter-interactive-design/
 ├── expo-android-performance/
 └── expo-interactive-design/
@@ -143,12 +156,14 @@ Validate the repository structure and metadata:
 
 ```bash
 python3 scripts/validate_skills.py
+bash flutter-play-store-release/tests/run_tests.sh
 ```
 
 If the official `skill-creator` tools are installed, validate each skill separately:
 
 ```bash
 python3 /path/to/skill-creator/scripts/quick_validate.py app-store-listing-creator
+python3 /path/to/skill-creator/scripts/quick_validate.py flutter-play-store-release
 ```
 
 ## Contributing

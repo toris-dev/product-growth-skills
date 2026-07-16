@@ -6331,6 +6331,104 @@ references/troubleshooting.md'
   pass 'documentation'
 }
 
+installation() {
+  INSTALLATION_ROOT="$TMP_ROOT/installation"
+  INSTALLATION_HOME="$INSTALLATION_ROOT/home"
+  INSTALLATION_SOURCE="$INSTALLATION_ROOT/source"
+  mkdir -p "$INSTALLATION_HOME" "$INSTALLATION_SOURCE"
+  cp -R "$PACKAGE_ROOT/." "$INSTALLATION_SOURCE/"
+
+  if ! HOME="$INSTALLATION_HOME" "$PACKAGE_ROOT/install.sh" \
+    --source "$INSTALLATION_SOURCE" > "$INSTALLATION_ROOT/install.stdout" \
+    2> "$INSTALLATION_ROOT/install.stderr"
+  then
+    cat "$INSTALLATION_ROOT/install.stderr" >&2
+    fail 'initial dual-destination installation failed'
+  fi
+
+  installation_claude="$INSTALLATION_HOME/.claude/skills/flutter-play-store-release"
+  installation_agents="$INSTALLATION_HOME/.agents/skills/flutter-play-store-release"
+  assert_file_path() {
+    [ -f "$1" ] && [ ! -L "$1" ] || fail "$2"
+  }
+  assert_file_path "$installation_claude/.skill-install-receipt" \
+    'Claude installation receipt is missing'
+  assert_file_path "$installation_agents/.skill-install-receipt" \
+    'Agents installation receipt is missing'
+  assert_same_file "$installation_claude/.skill-install-receipt" \
+    "$installation_agents/.skill-install-receipt" \
+    'dual-destination receipts differ'
+  assert_same_file "$installation_claude/README.md" \
+    "$installation_agents/README.md" \
+    'dual-destination package files differ'
+  [ ! -e "$installation_claude/tests" ] || \
+    fail 'canonical-only tests were installed'
+
+  printf '\nLifecycle update fixture.\n' >> "$INSTALLATION_SOURCE/README.md"
+  HOME="$INSTALLATION_HOME" "$PACKAGE_ROOT/update.sh" \
+    --source "$INSTALLATION_SOURCE" > "$INSTALLATION_ROOT/update.stdout" \
+    2> "$INSTALLATION_ROOT/update.stderr" || fail 'verified update failed'
+  assert_same_file "$INSTALLATION_SOURCE/README.md" \
+    "$installation_claude/README.md" 'Claude update content differs'
+  assert_same_file "$installation_claude/README.md" \
+    "$installation_agents/README.md" 'updated copies differ'
+
+  printf 'user edit\n' >> "$installation_claude/README.md"
+  if HOME="$INSTALLATION_HOME" "$PACKAGE_ROOT/update.sh" \
+    --source "$INSTALLATION_SOURCE" > /dev/null 2>&1
+  then
+    fail 'update accepted an edited installed file'
+  fi
+  grep -F 'user edit' "$installation_claude/README.md" >/dev/null 2>&1 ||
+    fail 'refused update mutated the edited destination'
+
+  if HOME="$INSTALLATION_HOME" "$PACKAGE_ROOT/uninstall.sh" --yes \
+    > /dev/null 2>&1
+  then
+    fail 'uninstall accepted an edited installed file'
+  fi
+  grep -F 'user edit' "$installation_claude/README.md" >/dev/null 2>&1 ||
+    fail 'refused uninstall mutated the edited destination'
+
+  INSTALLATION_RECOVERY_SOURCE="$INSTALLATION_ROOT/recovery-source"
+  mkdir -p "$INSTALLATION_RECOVERY_SOURCE"
+  cp -R "$PACKAGE_ROOT/." "$INSTALLATION_RECOVERY_SOURCE/"
+  printf '\nCrash recovery fixture.\n' >> "$INSTALLATION_RECOVERY_SOURCE/README.md"
+  for installation_phase in \
+    staged claude_old_moved agents_old_moved claude_new_installed \
+    agents_new_installed validated committed
+  do
+    phase_home="$INSTALLATION_ROOT/home-$installation_phase"
+    mkdir -p "$phase_home"
+    HOME="$phase_home" "$PACKAGE_ROOT/install.sh" --source "$PACKAGE_ROOT" \
+      > /dev/null 2>&1 || fail "phase fixture install failed: $installation_phase"
+    if env HOME="$phase_home" FPRS_TEST_MODE=1 \
+      FPRS_TEST_KILL_INSTALL_PHASE="$installation_phase" \
+      "$PACKAGE_ROOT/update.sh" --source "$INSTALLATION_RECOVERY_SOURCE" \
+      > /dev/null 2>&1
+    then
+      fail "phase kill did not stop update: $installation_phase"
+    fi
+    HOME="$phase_home" "$PACKAGE_ROOT/update.sh" --source "$INSTALLATION_ROOT/missing-source" \
+      > /dev/null 2>&1 && fail "invalid source unexpectedly succeeded: $installation_phase"
+    phase_claude="$phase_home/.claude/skills/flutter-play-store-release/README.md"
+    phase_agents="$phase_home/.agents/skills/flutter-play-store-release/README.md"
+    assert_same_file "$phase_claude" "$phase_agents" \
+      "recovery split installed copies: $installation_phase"
+    if [ "$installation_phase" = committed ]; then
+      assert_same_file "$INSTALLATION_RECOVERY_SOURCE/README.md" "$phase_claude" \
+        'committed recovery did not preserve the new copy'
+    else
+      assert_same_file "$PACKAGE_ROOT/README.md" "$phase_claude" \
+        "pre-commit recovery did not restore the prior copy: $installation_phase"
+    fi
+    [ ! -e "$phase_home/.flutter-play-store-release-install-state/transaction" ] ||
+      fail "recovery journal remained after phase recovery: $installation_phase"
+  done
+
+  pass 'installation'
+}
+
 run_test_group() {
   case "$1" in
     package_contract) package_contract ;;
@@ -6345,6 +6443,7 @@ run_test_group() {
     workflow_template) workflow_template ;;
     release_validator) release_validator ;;
     documentation) documentation ;;
+    installation) installation ;;
     *) fail "unknown test group: $1" ;;
   esac
 }

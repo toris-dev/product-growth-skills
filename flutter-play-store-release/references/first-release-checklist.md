@@ -117,15 +117,18 @@ APK delivery does not require the Play link. See [Play/Firebase linking](https:/
 - [ ] Configure reviewer/tag protection externally and record it as unverified by file-only validation.
 - [ ] Confirm exact Flutter resolution, pinned actions, Java/Ruby/Bundler versions, concurrency, and immutable checkout behavior.
 - [ ] Select exactly one Slack notification owner and verify secrets do not enter payloads.
+- [ ] Keep Slack disabled by default; require a per-run confirmation or the separate documented release-event standing authorization.
 - [ ] Confirm Slack failure cannot mask the release result.
 
 ## 11. Final automation preflight
 
 - [ ] Run `validate_release_setup.sh --project PATH --context deploy` without network access.
 - [ ] Confirm the named target and track. Internal authorization covers only internal.
+- [ ] Confirm Play-only/Firebase-only lanes are pinned; require exact `both` plus its separate confirmation for dual delivery.
 - [ ] Query all configured Play tracks successfully before allocating a version code.
 - [ ] Confirm no concurrent upload can allocate the same code.
 - [ ] Confirm release status and rollout are valid; production is never the default.
+- [ ] Pin ordinary deploys to `completed` with no rollout; require exact lane options and separate confirmation for non-default policy.
 - [ ] Confirm release notes, testers/groups, notification flags, result path, and artifact type are ordinary configuration, not secrets.
 - [ ] Verify rollback and promotion are separate authorized actions.
 - [ ] Record missing console access, policy state, Environment protection, and provider permissions as not verified.

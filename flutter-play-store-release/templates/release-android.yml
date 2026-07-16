@@ -24,7 +24,11 @@ on:
         required: true
         default: completed
         type: choice
-        options: [draft, completed, inProgress, halted]
+        options: [draft, completed, inProgress]
+      rollout:
+        description: "Required decimal strictly between 0 and 1 for an authorized inProgress release"
+        required: false
+        type: string
       run_tests:
         description: "Run Flutter tests before building"
         required: true
@@ -56,6 +60,21 @@ on:
         required: true
         default: false
         type: boolean
+      confirm_dual_delivery:
+        description: "Separately authorize delivery to both Google Play and Firebase"
+        required: true
+        default: false
+        type: boolean
+      confirm_play_release_policy:
+        description: "Separately authorize draft or inProgress status and any rollout"
+        required: true
+        default: false
+        type: boolean
+      confirm_slack_notification:
+        description: "Separately authorize one Slack message for this first run attempt"
+        required: true
+        default: false
+        type: boolean
       confirm_production:
         description: "Required acknowledgement for the production Play track"
         required: true
@@ -84,21 +103,35 @@ jobs:
         id: route
         env:
           EVENT_NAME: ${{ github.event_name }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          ENABLE_GITHUB_RELEASE_DEPLOY: ${{ vars.ENABLE_GITHUB_RELEASE_DEPLOY }}
           VERSION_NAME: ${{ inputs.version_name }}
           FLUTTER_VERSION: ${{ inputs.flutter_version }}
           TRACK: ${{ inputs.track }}
           RELEASE_STATUS: ${{ inputs.release_status }}
+          ROLLOUT: ${{ inputs.rollout }}
           RUN_TESTS: ${{ inputs.run_tests }}
           DISTRIBUTION_TARGET: ${{ inputs.distribution_target }}
           FIREBASE_ARTIFACT_TYPE: ${{ inputs.firebase_artifact_type }}
           FIREBASE_RELEASE_NOTES: ${{ inputs.firebase_release_notes }}
           CONFIRM_FIREBASE_PACKAGE_MATCH: ${{ inputs.confirm_firebase_package_match }}
           CONFIRM_FIREBASE_AAB_PLAY_LINKED: ${{ inputs.confirm_firebase_aab_play_linked }}
+          CONFIRM_DUAL_DELIVERY: ${{ inputs.confirm_dual_delivery }}
+          CONFIRM_PLAY_RELEASE_POLICY: ${{ inputs.confirm_play_release_policy }}
+          CONFIRM_SLACK_NOTIFICATION: ${{ inputs.confirm_slack_notification }}
           CONFIRM_PRODUCTION: ${{ inputs.confirm_production }}
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "$GITHUB_RUN_ATTEMPT" != "1" ]]; then
+            printf 'Workflow rerun rejected: reconcile the exact version, artifact SHA-256, and destination at the provider, then start a fresh authorized dispatch.\n' >&2
+            exit 1
+          fi
           if [[ "$EVENT_NAME" == "release" ]]; then
+            [[ "$ENABLE_GITHUB_RELEASE_DEPLOY" == "true" ]] || {
+              printf 'GitHub Release deployment is disabled; explicitly set ENABLE_GITHUB_RELEASE_DEPLOY=true during CI setup to authorize fixed play-store/internal delivery.\n' >&2
+              exit 1
+            }
             printf 'deployment_environment=play-store-nonproduction\n' >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -115,13 +148,37 @@ jobs:
             exit 1
           }
           [[ "$TRACK" =~ ^(internal|alpha|beta|production)$ ]]
-          [[ "$RELEASE_STATUS" =~ ^(draft|completed|inProgress|halted)$ ]]
+          [[ "$RELEASE_STATUS" =~ ^(draft|completed|inProgress)$ ]]
           [[ "$RUN_TESTS" =~ ^(true|false)$ ]]
           [[ "$DISTRIBUTION_TARGET" =~ ^(play-store|firebase|both)$ ]]
           [[ "$FIREBASE_ARTIFACT_TYPE" =~ ^(AAB|APK)$ ]]
           [[ "$CONFIRM_FIREBASE_PACKAGE_MATCH" =~ ^(true|false)$ ]]
           [[ "$CONFIRM_FIREBASE_AAB_PLAY_LINKED" =~ ^(true|false)$ ]]
+          [[ "$CONFIRM_DUAL_DELIVERY" =~ ^(true|false)$ ]]
+          [[ "$CONFIRM_PLAY_RELEASE_POLICY" =~ ^(true|false)$ ]]
+          [[ "$CONFIRM_SLACK_NOTIFICATION" =~ ^(true|false)$ ]]
           [[ "$CONFIRM_PRODUCTION" =~ ^(true|false)$ ]]
+          if [[ "$DISTRIBUTION_TARGET" == "both" && "$CONFIRM_DUAL_DELIVERY" != "true" ]]; then
+            printf 'Dual delivery rejected: set confirm_dual_delivery=true after authorizing both destinations.\n' >&2
+            exit 1
+          fi
+          if [[ "$RELEASE_STATUS" != "completed" || -n "$ROLLOUT" ]]; then
+            [[ "$CONFIRM_PLAY_RELEASE_POLICY" == "true" ]] || {
+              printf 'Non-default Play release policy requires confirm_play_release_policy=true.\n' >&2
+              exit 1
+            }
+          fi
+          if [[ "$RELEASE_STATUS" == "inProgress" ]]; then
+            python3 - "$ROLLOUT" <<'PY'
+          import sys
+          value = float(sys.argv[1])
+          if not 0.0 < value < 1.0:
+              raise SystemExit("rollout must be strictly between 0 and 1")
+          PY
+          elif [[ -n "$ROLLOUT" ]]; then
+            printf 'rollout is accepted only with release_status=inProgress.\n' >&2
+            exit 1
+          fi
           if [[ "$TRACK" == "production" && "$CONFIRM_PRODUCTION" != "true" ]]; then
             printf 'Production dispatch rejected: set confirm_production=true after review.\n' >&2
             exit 1
@@ -144,7 +201,7 @@ jobs:
       RELEASE_RESULT_PATH: ${{ runner.temp }}/release-result.json
     steps:
       - name: Checkout immutable event commit
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -159,12 +216,18 @@ jobs:
           REPOSITORY_FLUTTER_VERSION: ${{ vars.FLUTTER_VERSION }}
           TRACK: ${{ inputs.track }}
           RELEASE_STATUS: ${{ inputs.release_status }}
+          ROLLOUT: ${{ inputs.rollout }}
           RUN_TESTS: ${{ inputs.run_tests }}
           DISTRIBUTION_TARGET: ${{ inputs.distribution_target }}
           FIREBASE_ARTIFACT_TYPE: ${{ inputs.firebase_artifact_type }}
           FIREBASE_RELEASE_NOTES: ${{ inputs.firebase_release_notes || vars.FIREBASE_RELEASE_NOTES || '' }}
           CONFIRM_FIREBASE_PACKAGE_MATCH: ${{ inputs.confirm_firebase_package_match }}
           CONFIRM_FIREBASE_AAB_PLAY_LINKED: ${{ inputs.confirm_firebase_aab_play_linked }}
+          CONFIRM_DUAL_DELIVERY: ${{ inputs.confirm_dual_delivery }}
+          CONFIRM_PLAY_RELEASE_POLICY: ${{ inputs.confirm_play_release_policy }}
+          CONFIRM_SLACK_NOTIFICATION: ${{ inputs.confirm_slack_notification }}
+          CONFIRM_PRODUCTION: ${{ inputs.confirm_production }}
+          RELEASE_EVENT_SLACK_AUTHORIZED: ${{ vars.ENABLE_GITHUB_RELEASE_SLACK_NOTIFICATION }}
         shell: bash
         run: |
           set -euo pipefail
@@ -183,38 +246,55 @@ jobs:
             version_name="$release_tag"
             track=internal
             release_status=completed
+            rollout=
             run_tests=true
             distribution_target=play-store
             firebase_artifact_type=AAB
             confirm_package=false
             confirm_linked=false
+            confirm_dual=false
+            confirm_policy=false
+            confirm_slack="$RELEASE_EVENT_SLACK_AUTHORIZED"
+            confirm_production=false
+            [[ "$confirm_slack" =~ ^(true|false)$ ]] || confirm_slack=false
           else
             [[ "$EVENT_NAME" == "workflow_dispatch" ]]
             version_name="$VERSION_NAME"
             track="$TRACK"
             release_status="$RELEASE_STATUS"
+            rollout="$ROLLOUT"
             run_tests="$RUN_TESTS"
             distribution_target="$DISTRIBUTION_TARGET"
             firebase_artifact_type="$FIREBASE_ARTIFACT_TYPE"
             confirm_package="$CONFIRM_FIREBASE_PACKAGE_MATCH"
             confirm_linked="$CONFIRM_FIREBASE_AAB_PLAY_LINKED"
+            confirm_dual="$CONFIRM_DUAL_DELIVERY"
+            confirm_policy="$CONFIRM_PLAY_RELEASE_POLICY"
+            confirm_slack="$CONFIRM_SLACK_NOTIFICATION"
+            confirm_production="$CONFIRM_PRODUCTION"
           fi
           [[ "$version_name" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]
           [[ "$track" =~ ^(internal|alpha|beta|production)$ ]]
-          [[ "$release_status" =~ ^(draft|completed|inProgress|halted)$ ]]
+          [[ "$release_status" =~ ^(draft|completed|inProgress)$ ]]
           [[ "$run_tests" =~ ^(true|false)$ ]]
           [[ "$distribution_target" =~ ^(play-store|firebase|both)$ ]]
           [[ "$firebase_artifact_type" =~ ^(AAB|APK)$ ]]
           [[ "$confirm_package" =~ ^(true|false)$ ]]
           [[ "$confirm_linked" =~ ^(true|false)$ ]]
+          [[ "$confirm_dual" =~ ^(true|false)$ ]]
+          [[ "$confirm_policy" =~ ^(true|false)$ ]]
+          [[ "$confirm_slack" =~ ^(true|false)$ ]]
+          [[ "$confirm_production" =~ ^(true|false)$ ]]
           python3 - "$input_root" "$version_name" "$track" "$release_status" \
             "$run_tests" "$distribution_target" "$firebase_artifact_type" \
-            "$confirm_package" "$confirm_linked" <<'PY'
+            "$confirm_package" "$confirm_linked" "$rollout" "$confirm_dual" \
+            "$confirm_policy" "$confirm_slack" "$confirm_production" <<'PY'
           import os, sys
           root = sys.argv[1]
           names = ("version_name", "track", "release_status", "run_tests",
                    "distribution_target", "firebase_artifact_type",
-                   "confirm_package", "confirm_linked")
+                   "confirm_package", "confirm_linked", "rollout", "confirm_dual",
+                   "confirm_policy", "confirm_slack", "confirm_production")
           for name, value in zip(names, sys.argv[2:]):
               with open(os.path.join(root, name), "x", encoding="utf-8", newline="") as handle:
                   handle.write(value)
@@ -262,7 +342,7 @@ jobs:
           chmod 600 "$input_root/flutter_version"
 
       - name: Set up Java 17
-        uses: actions/setup-java@ae2b61dbc685e60e4427b2e8ed4f0135ae3297ce # v5.0.0
+        uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5.5.0
         with:
           distribution: temurin
           java-version: "17"
@@ -280,7 +360,7 @@ jobs:
           printf '%s\n' "$RUNNER_TEMP/flutter-sdk/bin" >> "$GITHUB_PATH"
 
       - name: Set up Ruby and frozen Android Bundler cache
-        uses: ruby/setup-ruby@44511735964dcb71245e7e55f72539531f7bc0eb # v1.257.0
+        uses: ruby/setup-ruby@8e41b362d2589a22a44c1cfa214b3c83052c195b # v1.318.0
         with:
           ruby-version: "3.3"
           bundler: "4.0.16"
@@ -432,12 +512,16 @@ jobs:
           VERSION_NAME=$(cat "$input_root/version_name")
           PLAY_STORE_TRACK=$(cat "$input_root/track")
           PLAY_STORE_RELEASE_STATUS=$(cat "$input_root/release_status")
+          PLAY_STORE_ROLLOUT=$(cat "$input_root/rollout")
           RUN_FLUTTER_TESTS=$(cat "$input_root/run_tests")
           DISTRIBUTION_TARGET=$(cat "$input_root/distribution_target")
           FIREBASE_ANDROID_ARTIFACT_TYPE=$(cat "$input_root/firebase_artifact_type")
           FIREBASE_RELEASE_NOTES=$(cat "$input_root/firebase_release_notes")
           CONFIRM_FIREBASE_PACKAGE_MATCH=$(cat "$input_root/confirm_package")
           CONFIRM_FIREBASE_AAB_PLAY_LINKED=$(cat "$input_root/confirm_linked")
+          CONFIRM_DUAL_DELIVERY=$(cat "$input_root/confirm_dual")
+          CONFIRM_PLAY_RELEASE_POLICY=$(cat "$input_root/confirm_policy")
+          CONFIRM_PRODUCTION_DEPLOY=$(cat "$input_root/confirm_production")
           APP_PACKAGE_NAME=$(cat "$secret_root/app-package-name")
           ANDROID_KEY_PROPERTIES_PATH="$secret_root/key.properties"
           GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_PATH=
@@ -455,16 +539,19 @@ jobs:
           GITHUB_REPOSITORY="$GITHUB_REPOSITORY_VALUE"
           GITHUB_RUN_ID="$GITHUB_RUN_ID_VALUE"
           GITHUB_SHA="$GITHUB_SHA_VALUE"
-          export VERSION_NAME PLAY_STORE_TRACK PLAY_STORE_RELEASE_STATUS RUN_FLUTTER_TESTS \
+          export VERSION_NAME PLAY_STORE_TRACK RUN_FLUTTER_TESTS \
             DISTRIBUTION_TARGET FIREBASE_ANDROID_ARTIFACT_TYPE FIREBASE_RELEASE_NOTES \
-            CONFIRM_FIREBASE_PACKAGE_MATCH CONFIRM_FIREBASE_AAB_PLAY_LINKED \
+            CONFIRM_FIREBASE_PACKAGE_MATCH CONFIRM_FIREBASE_AAB_PLAY_LINKED CONFIRM_DUAL_DELIVERY \
+            CONFIRM_PLAY_RELEASE_POLICY CONFIRM_PRODUCTION_DEPLOY \
             APP_PACKAGE_NAME ANDROID_KEY_PROPERTIES_PATH GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_PATH \
             FIREBASE_SERVICE_ACCOUNT_JSON_PATH ENABLE_FIREBASE_APP_DISTRIBUTION \
             FIREBASE_APP_ID FIREBASE_TESTER_GROUPS FIREBASE_TESTERS \
             GITHUB_SERVER_URL GITHUB_REPOSITORY GITHUB_RUN_ID GITHUB_SHA
           export BUNDLE_FROZEN=true BUNDLE_DEPLOYMENT=true CI=true GITHUB_ACTIONS=true
           cd android
-          bundle exec fastlane android release distribution_target:"$DISTRIBUTION_TARGET"
+          lane_args=(distribution_target:"$DISTRIBUTION_TARGET" release_status:"$PLAY_STORE_RELEASE_STATUS")
+          [[ -n "$PLAY_STORE_ROLLOUT" ]] && lane_args+=(rollout:"$PLAY_STORE_ROLLOUT")
+          bundle exec fastlane android release "${lane_args[@]}"
 
       - name: Add nonsecret release result to the job summary
         if: ${{ always() }}
@@ -504,6 +591,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          [[ "$(cat "$RUNNER_TEMP/flutter-play-store-release-inputs/confirm_slack")" == "true" ]] || exit 0
+          [[ "${GITHUB_RUN_ATTEMPT:-1}" == "1" ]] || exit 0
           [[ -n "$SLACK_WEBHOOK_URL" ]] || exit 0
           notify_root="$RUNNER_TEMP/flutter-play-store-release-notification"
           install -d -m 700 "$notify_root"

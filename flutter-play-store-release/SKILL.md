@@ -39,7 +39,7 @@ Select exactly one primary mode. Treat supporting checks as part of that mode.
 | `setup` | Install or merge Fastlane, signing hooks, workflow, tools, and project guidance. | None. |
 | `doctor` | Read and validate the existing release setup. | None. |
 | `build` | Produce and verify a local signed AAB without upload. | None. |
-| `deploy` | Upload one verified AAB to the explicitly named Play track. | Google Play only. |
+| `deploy` | Upload one verified AAB to the explicitly named Play track, or explicitly request both destinations with a separate dual-delivery confirmation. | Google Play; Firebase too only for an authorized `both` request. |
 | `ci` | Configure or repair the generated GitHub Actions workflow. | None during configuration. |
 | `firebase-distribution` | Configure Firebase delivery or, when explicitly requested, distribute to named testers or groups. | Firebase only. |
 | `slack` | Configure notifications or test a webhook when explicitly requested. | Slack only. |
@@ -77,6 +77,8 @@ Require an explicit request before any of these actions:
 - Send a Slack message.
 
 Interpret an explicit internal deploy as authorization for only the named internal track after preflight passes. Do not extend it to another track, promotion, staged rollout, Firebase, Slack, or production. Require `CONFIRM_PRODUCTION_DEPLOY=true` in addition to a separately explicit production request.
+
+Never derive Firebase or `both` delivery from ambient environment values. The Play and Firebase lanes pin their own destination. `both` requires the exact lane option `distribution_target:both` plus `CONFIRM_DUAL_DELIVERY=true`. Ordinary Play deploys pin `completed` and no rollout; `draft` or `inProgress` must be exact lane options and require `CONFIRM_PLAY_RELEASE_POLICY=true`. A Slack send independently requires `CONFIRM_SLACK_NOTIFICATION=true`.
 
 Never create a populated `.env`, `android/key.properties`, keystore, service-account JSON, or GitHub secret unless the user explicitly requests that exact mutation. Inspect credential presence without printing values. Never enable shell tracing while secrets may be present.
 
@@ -138,13 +140,15 @@ PLAY_STORE_TRACK=internal bundle exec fastlane android release_play_store
 
 Replace `internal` only with the track the user explicitly named. Stop before network access on failed package, signing, credential, track, artifact, or version checks. Never claim deployment from a successful build alone.
 
+Do not retry an unknown upload outcome. Reconcile the exact prior version name/code, artifact SHA-256 identifier, and destination at the provider. A retry marked with `RETRY_UNKNOWN_UPLOAD=true` must include the exact reconciliation fields, prove provider state `not-delivered`, and set `CONFIRM_UPLOAD_RECONCILED=true` before any adapter is called. Retry/reconciliation runs never send automatic Slack notifications; after final provider state is known, a separately authorized manual message is required.
+
 ### CI, Firebase, and Slack
 
-For `ci`, configure the generated workflow and document the fixed GitHub Environments `play-store-nonproduction` and `play-store-production`. Leave reviewer and tag protection as an external, unverified repository setting.
+For `ci`, configure the generated workflow and document the fixed GitHub Environments `play-store-nonproduction` and `play-store-production`. GitHub `release.published` delivery is disabled by default and becomes a standing authorization only when the user explicitly sets `ENABLE_GITHUB_RELEASE_DEPLOY=true`; that event remains fixed to Play/internal/completed. Leave reviewer and tag protection as an external, unverified repository setting.
 
 For `firebase-distribution`, keep Firebase credentials separate from Play credentials. Require a matching Firebase application and, for AAB delivery, a reviewed Play link plus `CONFIRM_FIREBASE_AAB_PLAY_LINKED=true`. An AAB link confirmation does not authorize a Play release.
 
-For `slack`, keep `SLACK_NOTIFICATION_OWNER` single-owner. Make notification failures warnings that never replace the build or delivery result. Do not test a webhook without explicit authorization to send a message.
+For `slack`, keep `SLACK_NOTIFICATION_OWNER` single-owner and require `CONFIRM_SLACK_NOTIFICATION=true` for the current run, or the separately documented release-event standing authorization. Workflow reruns suppress notification and require a fresh authorized dispatch. Make notification failures warnings that never replace the build or delivery result. Do not test a webhook without explicit authorization to send a message.
 
 Use [environment variables](references/environment-variables.md), [first release checklist](references/first-release-checklist.md), and [troubleshooting](references/troubleshooting.md) for detailed operator decisions.
 
@@ -163,12 +167,20 @@ When setup or build execution is authorized, add `--context setup|build --run-pr
 
 ## Completion report
 
-Return these headings:
+Return these exact ten English headings, in this order:
 
-- **Changed:** List created, merged, modified, and preserved paths.
-- **Verified:** List exact commands and observed results.
-- **Not verified:** List missing access, credentials, platform state, or project prerequisites.
-- **Your action:** List only steps that require the user, such as secret entry, console review, first manual upload, or production approval.
+1. **Global skill installation result**
+2. **Created skill files**
+3. **Current Flutter project changes**
+4. **Detected project information**
+5. **Values the user must prepare**
+6. **Local validation commands**
+7. **GitHub Secrets**
+8. **Deployment commands**
+9. **Validation results**
+10. **Cautions**
+
+Within file-change sections, use the exact subgroups **Created**, **Modified**, **Preserved**, and **Backup** even when a subgroup is empty. In **Validation results**, label every check as **PASS**, **WARN**, **FAIL**, or **not run**; never convert an unrun or externally unverifiable check into PASS.
 
 Never report a Play, Firebase, or Slack action as successful unless its adapter returned success and the final result preserved that outcome.
 

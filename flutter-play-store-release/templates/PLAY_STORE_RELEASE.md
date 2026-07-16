@@ -79,7 +79,7 @@ Add `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64` for `play-store` or `both`. Add th
 
 Exactly four values may be secret-backed optional configuration: `SLACK_WEBHOOK_URL`, `FIREBASE_APP_ID`, `FIREBASE_TESTER_GROUPS`, and `FIREBASE_TESTERS`. `FIREBASE_APP_ID` is required at runtime for a Firebase target, but it may come from a documented nonsecret variable. Release notes, artifact flags, confirmation flags, track, release status, rollout, and notification flags are not secrets.
 
-Use `play-store-nonproduction` for release events and nonproduction dispatches. Use `play-store-production` only for confirmed production dispatches. Configure required reviewers and tag protection in GitHub settings; file validation cannot prove those external controls.
+Use `play-store-nonproduction` for nonproduction dispatches and explicitly opted-in release events. Use `play-store-production` only for confirmed production dispatches. Configure required reviewers and tag protection in GitHub settings; file validation cannot prove those external controls.
 
 Resolve Flutter in this exact order:
 
@@ -162,7 +162,7 @@ The lane queries configured tracks for the next active version code, builds one 
 
 ## 11. GitHub Release runs
 
-Publishing a GitHub Release invokes the immutable release tag commit and always routes to `play-store-nonproduction`. The workflow derives the version name from the release tag, runs tests, selects `play-store`, uses `internal`, and does not allow the event to route to production.
+GitHub Release deployment is disabled by default. Explicitly setting repository variable `ENABLE_GITHUB_RELEASE_DEPLOY=true` during CI setup creates a standing authorization for `release.published`; the event remains fixed to the immutable tag commit, `play-store`, `internal`, `completed`, and `play-store-nonproduction`. It cannot route to Firebase, a rollout, or production.
 
 Before publishing the GitHub Release, verify the tag points at the intended commit, required nonproduction Environment secrets are present, the exact Flutter version resolves, and no other release for this app is running.
 
@@ -172,15 +172,16 @@ Use `workflow_dispatch` for a deliberate target, track, version, status, tests f
 
 - Route every nonproduction run to `play-store-nonproduction`.
 - Route production only to `play-store-production` after a separate production request and confirmation.
-- Use `completed` or `draft` without rollout. Use `inProgress` only with `0 < PLAY_STORE_ROLLOUT < 1`.
+- Ordinary deploys use `completed` without rollout. Pass `release_status:draft` or exact `release_status:inProgress rollout:VALUE` lane options only after the separate request and `CONFIRM_PLAY_RELEASE_POLICY=true`.
+- Select `both` only with exact `distribution_target:both` and `CONFIRM_DUAL_DELIVERY=true`; ambient values never expand a target.
 - Do not use this binary-upload lane to halt an existing release.
 - Treat reviewer/tag protection as required external setup, not as a validated file property.
 
 ## 13. Slack notifications
 
-Set `SLACK_WEBHOOK_URL` only when notifications are wanted. Keep one notification owner with `SLACK_NOTIFICATION_OWNER=fastlane` locally or `github-actions` in CI. Configure `SLACK_NOTIFY_SUCCESS` and `SLACK_NOTIFY_FAILURE` as nonsecret booleans.
+Set `SLACK_WEBHOOK_URL` only when notifications are wanted. Keep one notification owner with `SLACK_NOTIFICATION_OWNER=fastlane` locally or `github-actions` in CI. `SLACK_NOTIFY_SUCCESS` and `SLACK_NOTIFY_FAILURE` remain preferences behind the default-off authority gate: require `CONFIRM_SLACK_NOTIFICATION=true` for a current run. Release events require the separate standing variable `ENABLE_GITHUB_RELEASE_SLACK_NOTIFICATION=true`.
 
-Messages include only repository, version, track, result, run URL, and commit or release URL. They must not include the environment, credentials, signing values, or raw provider errors. Slack failure must not mask the primary build or delivery result. Do not send a test message without explicit authorization.
+Messages include only repository, version, track, result, run URL, and commit or release URL. They must not include the environment, credentials, signing values, or raw provider errors. Slack failure must not mask the primary build or delivery result. Workflow reruns and `RETRY_UNKNOWN_UPLOAD=true` runs never auto-notify; send any later message separately after final provider state is known. Do not send a test message without explicit authorization.
 
 ## 14. Firebase App Distribution
 
@@ -197,7 +198,7 @@ See [Firebase Fastlane distribution](https://firebase.google.com/docs/app-distri
 - **Authentication:** Validate JSON structure, intended credential source, key status, and clock without printing the credential.
 - **Permissions:** Confirm the service-account invitation and target-app release permissions; do not substitute global admin access.
 - **Draft or new app:** Complete console app content, first upload, track, and Play App Signing steps.
-- **Reused version code:** Query all configured tracks, serialize releases, select the next valid code, rebuild, and retry once.
+- **Reused version code:** Query all configured tracks, serialize releases, and select a new valid code. If an upload outcome is unknown, do not rebuild or retry until the exact prior version/code, artifact SHA-256 identifier, and destination are reconciled and the provider proves `not-delivered`.
 - **Signing:** Compare upload certificate fingerprints, alias, properties path, and release signing assignment.
 - **Stale artifacts:** Remove only owned new output, restore quarantined prior output, and require exactly one fresh artifact.
 - **Firebase Play link:** Verify the Play account link, published package, integration state, and test certificate.

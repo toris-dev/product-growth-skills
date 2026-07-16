@@ -44,9 +44,9 @@ Play rejects a version code that has already been used, even when it is not visi
 2. Query every name in `PLAY_STORE_VERSION_TRACKS` plus the selected track.
 3. Treat an API error or malformed result as fatal; an empty track is valid.
 4. Select the maximum active code plus one within `1..2100000000`.
-5. Rebuild the AAB with the new code and retry the serialized upload once.
+5. If the rejection definitively proves no upload occurred, rebuild with the new code only after a fresh explicit deploy authorization.
 
-Google and Fastlane do not provide this workflow with an authoritative allocator for every code ever used. If Play still rejects reuse, refresh provider state and choose another higher valid code; never upload the old artifact again.
+Google and Fastlane do not provide this workflow with an authoritative allocator for every code ever used. If provider outcome is unknown, reconcile the exact prior version name/code, artifact SHA-256 identifier, and destination. Retry only after the provider proves `not-delivered`, the exact attestation is supplied, and `CONFIRM_UPLOAD_RECONCILED=true`; never upload the old artifact blindly.
 
 ## Signing
 
@@ -93,7 +93,7 @@ Slack is optional. Missing webhook means skip. HTTP, network, or payload failure
 4. Confirm no credentials or full environment are logged.
 5. Diagnose the webhook separately after preserving the primary release result.
 
-Slack failure must not mask a build, Play, or Firebase result. Do not send a test message without explicit authorization.
+Slack failure must not mask a build, Play, or Firebase result. `CONFIRM_SLACK_NOTIFICATION=true` is required independently of the webhook and preference flags. Workflow reruns and unknown-outcome retry runs suppress automatic Slack; any later message needs separate authorization after final provider state is known. Do not send a test message without explicit authorization.
 
 ## CI runner and actions
 

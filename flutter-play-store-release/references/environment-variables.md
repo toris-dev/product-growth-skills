@@ -9,7 +9,7 @@ Use this catalog for local Fastlane runs and generated GitHub Actions runs. Keep
 - Resolve Flutter as manual `flutter_version` input > project pin (`.fvmrc`, `.flutter-version`, `.fvm/fvm_config.json`) > repository variable `FLUTTER_VERSION` > fail.
 - Resolve release notes as `FIREBASE_RELEASE_NOTES` from the dispatch input > repository or Environment variable > generated version text.
 - Resolve version name as lane option > `VERSION_NAME` > one exact semantic-version tag at `HEAD` > `pubspec.yaml`.
-- Resolve build-only version code as `VERSION_CODE` > numeric `pubspec.yaml` build number > UTC fallback. Play deployment instead uses the maximum active code across `PLAY_STORE_VERSION_TRACKS` plus one and never falls back locally.
+- Resolve build-only version code as `VERSION_CODE` > numeric `pubspec.yaml` build number > positive Git commit count. Play deployment instead uses the maximum active code across `PLAY_STORE_VERSION_TRACKS` plus one and never falls back locally.
 
 ## Application, version, and toolchain
 
@@ -17,7 +17,7 @@ Use this catalog for local Fastlane runs and generated GitHub Actions runs. Keep
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `APP_PACKAGE_NAME` | Android package string | doctor, build, deploy, CI | None | Explicit value; must equal selected release `applicationId` | Secret in generated workflow; nonsecret by nature | Java package shape and exact release-ID match | App/release owner |
 | `VERSION_NAME` | SemVer-like string | build, deploy, CI | Exact tag or `pubspec.yaml` | Lane option > env > exact tag > pubspec | Nonsecret | `v?MAJOR.MINOR.PATCH` with supported prerelease | Release owner |
-| `VERSION_CODE` | Integer | local build or Firebase-only delivery | Pubspec code, then bounded UTC fallback | Env > pubspec > fallback; ignored for Play allocation | Nonsecret | `1..2100000000` | Release owner |
+| `VERSION_CODE` | Integer | local build or Firebase-only delivery | Pubspec code, then positive Git commit count | Env > pubspec > fallback; ignored for Play allocation | Nonsecret | `1..2100000000` | Release owner |
 | `FLUTTER_FLAVOR` | Flavor name | inspect, build, deploy | None | Lane option > env; never guessed silently | Nonsecret | Must match an inspected release flavor | App owner |
 | `RELEASE_DART_TARGET` | Relative Dart path | build, deploy | `lib/main.dart` | Lane option > env > default | Nonsecret | Contained readable Dart file | App owner |
 | `FLUTTER_VERSION` | Exact SDK version | GitHub Actions | None | Dispatch input > project pin > repository variable > fail | Nonsecret variable | Exact supported version syntax and verified archive | Repository owner |
@@ -32,12 +32,14 @@ Use this catalog for local Fastlane runs and generated GitHub Actions runs. Keep
 
 | Variable | Type | Context | Default | Precedence | Secrecy | Validation | Owner |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `DISTRIBUTION_TARGET` | Enum | doctor, deploy, CI | `play-store` | Lane option > env > default | Nonsecret | `play-store`, `firebase`, or `both` | Release owner |
-| `ENABLE_FIREBASE_APP_DISTRIBUTION` | Boolean | routing | `false` | Derived true for `firebase` or `both`; explicit value cannot disable a selected Firebase target | Nonsecret | `true` or `false` | Fastlane coordinator |
+| `DISTRIBUTION_TARGET` | Enum | doctor, deploy, CI | `play-store` | Exact lane option for delivery; ambient values are inspection-only and cannot expand a release | Nonsecret | `play-store`, `firebase`, or `both` | Release owner |
+| `ENABLE_FIREBASE_APP_DISTRIBUTION` | Boolean | read-only inspection compatibility | `false` | Never expands a delivery target | Nonsecret | `true` or `false` | Fastlane coordinator |
+| `CONFIRM_DUAL_DELIVERY` | Boolean confirmation | `both` delivery | `false` | Exact `true` in addition to `distribution_target:both` | Nonsecret | Exact `true`; never inferred | User/release approver |
 | `PLAY_STORE_TRACK` | Track name | Play build/deploy | `internal` | Validated input or env > default | Nonsecret | Safe track syntax; production needs confirmation | Release owner |
 | `PLAY_STORE_VERSION_TRACKS` | CSV track list | Play version allocation | `internal,alpha,beta,production` | Explicit env > default; selected track is added | Nonsecret | Unique safe names; each API query must succeed | Release owner |
-| `PLAY_STORE_RELEASE_STATUS` | Enum | Play deploy | `completed` | Validated input or env > default | Nonsecret | `completed`, `draft`, or `inProgress`; reject `halted` in this lane | Release owner |
-| `PLAY_STORE_ROLLOUT` | Decimal | staged Play deploy | None | Used only with `inProgress` | Nonsecret | Strictly greater than 0 and less than 1 | Release owner |
+| `PLAY_STORE_RELEASE_STATUS` | Enum | Play deploy | `completed` | Exact lane option; ambient non-default values fail closed | Nonsecret | `completed`, `draft`, or `inProgress` | Release owner |
+| `PLAY_STORE_ROLLOUT` | Decimal | staged Play deploy | None | Exact lane option used only with `inProgress` | Nonsecret | Strictly greater than 0 and less than 1 | Release owner |
+| `CONFIRM_PLAY_RELEASE_POLICY` | Boolean confirmation | non-default status or rollout | `false` | Exact `true` in addition to exact status/rollout lane options | Nonsecret | Exact `true`; never inferred | User/release approver |
 | `CONFIRM_PRODUCTION_DEPLOY` | Boolean confirmation | production Play deploy | `false` | Must be explicitly true in addition to a production request | Nonsecret | Exact `true`; never inferred | User/release approver |
 | `FIREBASE_ANDROID_ARTIFACT_TYPE` | Enum | Firebase build/delivery | `AAB` | Validated input or env > default; `both` forces AAB | Nonsecret | `AAB` or `APK` | Release owner |
 | `CONFIRM_FIREBASE_AAB_PLAY_LINKED` | Boolean confirmation | Firebase AAB | `false` | Explicit input or env only | Nonsecret | Exact `true` after reviewed Play link and test certificate | User/release approver |
@@ -47,7 +49,7 @@ Use this catalog for local Fastlane runs and generated GitHub Actions runs. Keep
 | `FIREBASE_TESTER_GROUPS` | CSV aliases | Firebase delivery | None | Secret or nonsecret Environment value > absent | Optional secret-backed | Provider group aliases | Tester owner |
 | `FIREBASE_APP_ID` | Firebase app ID | Firebase doctor/deploy | None | Environment secret or documented nonsecret variable | Optional secret-backed; required runtime value for Firebase | Match package mapping in `google-services.json`, or require confirmation if evidence is absent | Firebase owner |
 
-The workflow routes GitHub Release and every nonproduction manual run to `play-store-nonproduction`. It routes only a confirmed manual production run to `play-store-production`. Reviewer and tag protection are external GitHub settings that file validation cannot prove.
+The workflow is manual-only by default. A GitHub Release is allowed only after the user explicitly sets repository variable `ENABLE_GITHUB_RELEASE_DEPLOY=true`; its immutable contract is Play/internal/completed in `play-store-nonproduction`. Set `ENABLE_GITHUB_RELEASE_SLACK_NOTIFICATION=true` separately to authorize its Slack message. Only a confirmed manual production run routes to `play-store-production`. Reviewer and tag protection are external GitHub settings that file validation cannot prove.
 
 ## Credentials and signing
 
@@ -72,6 +74,7 @@ The five every-target GitHub secrets are `APP_PACKAGE_NAME`, `ANDROID_KEYSTORE_B
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `RELEASE_RESULT_PATH` | File path | release coordinator/CI | None; CI uses runner temporary JSON | Explicit env > no file | Nonsecret | Parent is writable; output is atomic mode 0600 JSON | Fastlane/workflow |
 | `SLACK_WEBHOOK_URL` | URL | optional notification | None | Approved secret store > absent/skip | Optional secret-backed | HTTPS webhook; never printed | Slack owner |
+| `CONFIRM_SLACK_NOTIFICATION` | Boolean authorization | Slack send | `false` | Exact per-run input; release events use their separate standing authorization | Nonsecret | Exact `true`; never inferred | User/release approver |
 | `SLACK_NOTIFY_SUCCESS` | Boolean | Fastlane-owned Slack | `true` | Explicit env > default | Nonsecret | `true` or `false` | Release owner |
 | `SLACK_NOTIFY_FAILURE` | Boolean | Fastlane-owned Slack | `true` | Explicit env > default | Nonsecret | `true` or `false` | Release owner |
 | `SLACK_NOTIFICATION_OWNER` | Enum | local/CI notification | `fastlane`; CI sets `github-actions` | Explicit coordinator value | Nonsecret | `fastlane` or `github-actions`; only one sender | Workflow owner |
@@ -79,6 +82,8 @@ The five every-target GitHub secrets are `APP_PACKAGE_NAME`, `ANDROID_KEYSTORE_B
 | `SOURCE_URL` | URL | Slack payload | Derived commit URL | Explicit env > derived URL > empty | Nonsecret | Safe link text only | Workflow/Fastlane |
 
 Slack failure must not mask the primary build or delivery result. The payload contains only repository, version, track, result, run URL, and source URL.
+
+For a retry after an unknown upload result, set `RETRY_UNKNOWN_UPLOAD=true` only after reconciling the provider. Require `CONFIRM_UPLOAD_RECONCILED=true`, exact `RECONCILED_VERSION_NAME`, positive `RECONCILED_VERSION_CODE`, lowercase 64-character `RECONCILED_ARTIFACT_SHA256` as the prior artifact identifier, exact `RECONCILED_DESTINATIONS`, and `RECONCILED_PROVIDER_STATE=not-delivered`. These values are an operator attestation; the runtime validates their shape and requested version/destination match but does not claim to recompute a prior artifact's SHA-256.
 
 ## System-provided context
 

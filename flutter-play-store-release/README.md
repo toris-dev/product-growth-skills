@@ -107,6 +107,8 @@ The last command uploads. Run it only after the user explicitly names that track
 - Preserve user-owned files and stop on ambiguous signing or release configuration.
 - Keep Play, Firebase, and signing credentials separate. Use least privilege and target-app permissions for service accounts.
 - Require explicit authorization for Play or Firebase uploads, Slack messages, production, promotion, rollout changes, key operations, console changes, and secret mutation.
+- Pin Play-only and Firebase-only lanes to their destination. Require exact `distribution_target:both` plus `CONFIRM_DUAL_DELIVERY=true` for dual delivery; ambient environment values never expand a release.
+- Pin ordinary Play delivery to `completed` with no rollout. Require exact lane options and `CONFIRM_PLAY_RELEASE_POLICY=true` for `draft`, `inProgress`, or rollout.
 - Never print secret values, use shell tracing around secrets, or commit `.env`, `key.properties`, keystores, or service-account JSON.
 - Treat a successful build as a build, not as deployment evidence.
 - Treat Slack notification failure as a warning. Slack failure must not mask a build or deployment failure, and it must not turn a successful release into a failed release.
@@ -123,10 +125,12 @@ flutter_version -> project pin -> FLUTTER_VERSION -> fail
 
 Use fixed Environments:
 
-- `play-store-nonproduction` for GitHub Release events and every nonproduction manual run.
+- `play-store-nonproduction` for every nonproduction manual run and only explicitly opted-in GitHub Release events.
 - `play-store-production` only for a confirmed manual production run.
 
 Configure Environment reviewer and tag protection in GitHub settings. Those are external controls that file validation cannot prove. Store Environment secrets in both environments as applicable. Keep `ANDROID_KEY_PROPERTIES_PATH` nonsecret and use it only for an existing private local properties file. Keep `FIREBASE_ANDROID_ARTIFACT_TYPE` nonsecret with `AAB` or `APK`.
+
+The workflow is manual-only by default. Setting repository variable `ENABLE_GITHUB_RELEASE_DEPLOY=true` is a standing authorization for `release.published` to deliver only to Play/internal/completed. Authorize its Slack message separately with `ENABLE_GITHUB_RELEASE_SLACK_NOTIFICATION=true`. Manual Slack sends require `confirm_slack_notification=true`; workflow reruns never auto-notify.
 
 ### GitHub Secrets groups
 
@@ -148,6 +152,8 @@ Exactly four values are optional secret-backed configuration:
 - `FIREBASE_TESTERS`
 
 `FIREBASE_APP_ID` becomes a required runtime value when `firebase` or `both` is selected. It may instead be a documented nonsecret repository or Environment variable when the identifier is not treated as sensitive. Tester names and groups may likewise be nonsecret variables when policy permits. Firebase release notes, distribution flags, confirmation flags, track, rollout, and notification flags are not secrets.
+
+Do not blindly rerun an unknown upload result. Reconcile the exact prior version name/code, artifact SHA-256 identifier, and destination at the provider. Retry only when the provider proves `not-delivered`, the exact reconciliation attestation matches the requested version/destination, and `CONFIRM_UPLOAD_RECONCILED=true`; retry runs suppress automatic Slack.
 
 Enter secrets yourself in GitHub settings. If you prefer the GitHub CLI, `gh secret set SECRET_NAME` is a user-run option; the skill must not execute it without explicit authorization.
 

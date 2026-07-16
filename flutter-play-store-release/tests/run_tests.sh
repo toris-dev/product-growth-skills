@@ -117,6 +117,7 @@ templates/env.example
 templates/key.properties.example
 templates/release-android.yml
 tests/fastlane_helper_test.rb
+tests/authorization_hardening_test.rb
 tests/run_tests.sh
 uninstall.sh
 update.sh
@@ -5148,6 +5149,8 @@ fastlane_templates() {
     fail 'Fastfile has invalid Ruby syntax'
   ruby "$PACKAGE_ROOT/tests/fastlane_helper_test.rb" ||
     fail 'Fastlane helper and adapter tests failed'
+  ruby "$PACKAGE_ROOT/tests/authorization_hardening_test.rb" --name /authorization/ ||
+    fail 'Authorization hardening regression tests failed'
   grep -F 'gem "fastlane", "= 2.237.0"' "$PACKAGE_ROOT/templates/Gemfile" >/dev/null 2>&1 ||
     fail 'Gemfile does not pin Fastlane 2.237.0 exactly'
   grep -F 'gem "fastlane-plugin-firebase_app_distribution", "= 1.0.0"' \
@@ -5463,8 +5466,10 @@ workflow_template() {
       fail "workflow is missing: $required_text"
   done
   for input_name in version_name flutter_version track release_status run_tests \
-    distribution_target firebase_artifact_type firebase_release_notes \
-    confirm_firebase_package_match confirm_firebase_aab_play_linked confirm_production
+    rollout distribution_target firebase_artifact_type firebase_release_notes \
+    confirm_firebase_package_match confirm_firebase_aab_play_linked \
+    confirm_dual_delivery confirm_play_release_policy confirm_slack_notification \
+    confirm_production
   do
     grep -E "^[[:space:]]{6}$input_name:" "$workflow" >/dev/null 2>&1 ||
       fail "workflow input is missing: $input_name"
@@ -5486,10 +5491,12 @@ raise "release published trigger is missing" unless events.dig("release", "types
 dispatch = events.fetch("workflow_dispatch").fetch("inputs")
 expected_inputs = {
   "version_name" => "string", "flutter_version" => "string", "track" => "choice",
-  "release_status" => "choice", "run_tests" => "boolean",
+  "release_status" => "choice", "rollout" => "string", "run_tests" => "boolean",
   "distribution_target" => "choice", "firebase_artifact_type" => "choice",
   "firebase_release_notes" => "string", "confirm_firebase_package_match" => "boolean",
-  "confirm_firebase_aab_play_linked" => "boolean", "confirm_production" => "boolean"
+  "confirm_firebase_aab_play_linked" => "boolean", "confirm_dual_delivery" => "boolean",
+  "confirm_play_release_policy" => "boolean", "confirm_slack_notification" => "boolean",
+  "confirm_production" => "boolean"
 }
 raise "manual inputs differ from the contract" unless dispatch.keys.sort == expected_inputs.keys.sort
 expected_inputs.each do |name, type|
@@ -5631,14 +5638,20 @@ RUBY
     workflow_gate_event=$4
     workflow_gate_track=$5
     workflow_gate_confirm=$6
+    workflow_gate_release_enabled=${7-true}
+    workflow_gate_attempt=${8-1}
     workflow_gate_output=$workflow_harness/gate-$workflow_run_counter.output
     workflow_run_expect "$workflow_gate_description" "$workflow_gate_expected" \
       "$workflow_harness" "$workflow_harness/preflight.sh" \
       GITHUB_OUTPUT="$workflow_gate_output" EVENT_NAME="$workflow_gate_event" \
+      GITHUB_RUN_ATTEMPT="$workflow_gate_attempt" \
+      ENABLE_GITHUB_RELEASE_DEPLOY="$workflow_gate_release_enabled" \
       VERSION_NAME=v1.2.3 FLUTTER_VERSION=3.38.1 TRACK="$workflow_gate_track" \
-      RELEASE_STATUS=completed RUN_TESTS=true DISTRIBUTION_TARGET=play-store \
+      RELEASE_STATUS=completed ROLLOUT= RUN_TESTS=true DISTRIBUTION_TARGET=play-store \
       FIREBASE_ARTIFACT_TYPE=AAB FIREBASE_RELEASE_NOTES=notes \
       CONFIRM_FIREBASE_PACKAGE_MATCH=false CONFIRM_FIREBASE_AAB_PLAY_LINKED=false \
+      CONFIRM_DUAL_DELIVERY=false CONFIRM_PLAY_RELEASE_POLICY=false \
+      CONFIRM_SLACK_NOTIFICATION=false \
       CONFIRM_PRODUCTION="$workflow_gate_confirm"
     if [ "$workflow_gate_expected" -eq 0 ]; then
       grep -Fx "deployment_environment=$workflow_gate_route" "$workflow_gate_output" >/dev/null 2>&1 ||
@@ -5649,7 +5662,9 @@ RUBY
     fi
   }
 
-  workflow_gate_case 'release routing failed' 0 play-store-nonproduction release internal false
+  workflow_gate_case 'release event bypassed default-off opt-in' 1 '' release internal false false
+  workflow_gate_case 'workflow rerun bypassed reconciliation guard' 1 '' workflow_dispatch internal false true 2
+  workflow_gate_case 'release routing failed' 0 play-store-nonproduction release internal false true
   workflow_gate_case 'nonproduction manual routing failed' 0 play-store-nonproduction workflow_dispatch beta false
   workflow_gate_case 'unconfirmed production was accepted' 1 '' workflow_dispatch production false
   workflow_gate_case 'confirmed production routing failed' 0 play-store-production workflow_dispatch production true
@@ -5690,10 +5705,13 @@ RUBY
       RUNNER_TEMP="$workflow_validate_root" EVENT_NAME="$workflow_validate_event" \
       RELEASE_TAG="$workflow_validate_tag" VERSION_NAME="$workflow_validate_version" \
       FLUTTER_VERSION=3.38.1 REPOSITORY_FLUTTER_VERSION= \
-      TRACK="$workflow_validate_track" RELEASE_STATUS="$workflow_validate_status" \
+      TRACK="$workflow_validate_track" RELEASE_STATUS="$workflow_validate_status" ROLLOUT= \
       RUN_TESTS=true DISTRIBUTION_TARGET="$workflow_validate_target" \
       FIREBASE_ARTIFACT_TYPE=AAB FIREBASE_RELEASE_NOTES="$workflow_validate_notes" \
-      CONFIRM_FIREBASE_PACKAGE_MATCH=false CONFIRM_FIREBASE_AAB_PLAY_LINKED=false
+      CONFIRM_FIREBASE_PACKAGE_MATCH=false CONFIRM_FIREBASE_AAB_PLAY_LINKED=false \
+      CONFIRM_DUAL_DELIVERY=true CONFIRM_PLAY_RELEASE_POLICY=false \
+      CONFIRM_SLACK_NOTIFICATION=false CONFIRM_PRODUCTION=false \
+      RELEASE_EVENT_SLACK_AUTHORIZED=false
     WORKFLOW_LAST_VALIDATE_ROOT=$workflow_validate_root
   }
 

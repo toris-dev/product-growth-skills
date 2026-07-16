@@ -38,6 +38,8 @@ Do not perform these actions unless the user explicitly authorizes the exact tar
 
 Creating a local submission-ready AAB does not authorize uploading it. A named internal-track deployment does not authorize another track or production. Firebase delivery does not authorize Play delivery. Slack configuration does not authorize sending a message.
 
+Ambient environment values never expand a delivery target, status, rollout, or Slack authority. Dual delivery, non-default Play policy, and Slack each require their own exact confirmation. A GitHub Release event authorizes fixed Play/internal/completed delivery only after the user explicitly opts into that standing contract during CI setup.
+
 ## Handle secrets
 
 - Inspect presence and metadata without printing values.
@@ -50,6 +52,7 @@ Creating a local submission-ready AAB does not authorize uploading it. A named i
 
 - Prefer current official sources for changing platform requirements.
 - Diagnose failures within scope and stop before unsafe retries.
+- After an unknown upload outcome, reconcile the exact prior version/code, artifact identifier, and destination at the provider; retry only after provider state is proven `not-delivered`. Retry runs never auto-notify Slack.
 - Mark checks blocked by missing access, credentials, hardware, or console state as not verified.
 - Do not claim success from intent, code inspection, a build-only result, or a favorable single check.
 - Preserve the primary build or deployment result when optional Slack notification fails.

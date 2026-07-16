@@ -548,9 +548,11 @@ class FlutterPlayStoreReleaseCoordinatorTest < Minitest::Test
         target: "both",
         env: common_env.merge(firebase_env,
           "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_PATH" => @play_json,
+          "CONFIRM_DUAL_DELIVERY" => "true",
           "RELEASE_RESULT_PATH" => result_path,
           "SLACK_WEBHOOK_URL" => "https://hooks.example.invalid/secret",
-          "SLACK_NOTIFY_FAILURE" => "true")
+          "SLACK_NOTIFY_FAILURE" => "true",
+          "CONFIRM_SLACK_NOTIFICATION" => "true")
       )
     end
     assert_match(/PARTIAL_SUCCESS/, error.message)
@@ -573,6 +575,7 @@ class FlutterPlayStoreReleaseCoordinatorTest < Minitest::Test
         target: "both",
         env: common_env.merge(firebase_env,
           "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_PATH" => @play_json,
+          "CONFIRM_DUAL_DELIVERY" => "true",
           "FIREBASE_ANDROID_ARTIFACT_TYPE" => "APK")
       )
     end
@@ -799,6 +802,7 @@ class FlutterPlayStoreReleaseCoordinatorTest < Minitest::Test
         target: "both",
         env: common_env.merge(firebase_env,
           "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_PATH" => @play_json,
+          "CONFIRM_DUAL_DELIVERY" => "true",
           "CONFIRM_FIREBASE_PACKAGE_MATCH" => "true")
       )
     end
@@ -821,16 +825,15 @@ class FlutterPlayStoreReleaseCoordinatorTest < Minitest::Test
   def test_release_status_rollout_and_production_confirmation
     in_progress = common_env.merge(
       "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_PATH" => @play_json,
-      "PLAY_STORE_RELEASE_STATUS" => "inProgress",
-      "PLAY_STORE_ROLLOUT" => "0.2"
+      "CONFIRM_PLAY_RELEASE_POLICY" => "true"
     )
-    release(target: "play-store", env: in_progress)
+    release(target: "play-store", env: in_progress, release_status: "inProgress", rollout: "0.2")
     assert_equal 0.2, calls(:upload_to_play_store).first.fetch(:rollout)
 
     %w[0 1 -0.1 nope].each do |rollout|
       @actions = FakeActions.new(@project)
       assert_raises(FPRS::ConfigurationError) do
-        release(target: "play-store", env: in_progress.merge("PLAY_STORE_ROLLOUT" => rollout))
+        release(target: "play-store", env: in_progress, release_status: "inProgress", rollout: rollout)
       end
       assert_empty calls(:google_play_track_version_codes)
     end
@@ -841,8 +844,8 @@ class FlutterPlayStoreReleaseCoordinatorTest < Minitest::Test
         target: "play-store",
         env: common_env.merge(
           "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_PATH" => @play_json,
-          "PLAY_STORE_RELEASE_STATUS" => status,
-          "PLAY_STORE_ROLLOUT" => "0.2")
+          "CONFIRM_PLAY_RELEASE_POLICY" => (status == "draft" ? "true" : "false")),
+        release_status: status
       )
       refute calls(:upload_to_play_store).first.key?(:rollout)
     end
@@ -1059,7 +1062,8 @@ class FlutterPlayStoreReleaseCoordinatorTest < Minitest::Test
         env: common_env.merge(
           "RELEASE_RESULT_PATH" => File.join(blocked_parent, "result.json"),
           "SLACK_WEBHOOK_URL" => "https://hooks.example.invalid/private",
-          "SLACK_NOTIFY_FAILURE" => "true")
+          "SLACK_NOTIFY_FAILURE" => "true",
+          "CONFIRM_SLACK_NOTIFICATION" => "true")
       )
     end
     assert_match(/DISTRIBUTION_TARGET/, error.message)
@@ -1100,7 +1104,8 @@ class FlutterPlayStoreReleaseCoordinatorTest < Minitest::Test
       env: common_env.merge(
         "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_PATH" => @play_json,
         "SLACK_WEBHOOK_URL" => "https://hooks.example.invalid/private",
-        "SLACK_NOTIFY_SUCCESS" => "true")
+        "SLACK_NOTIFY_SUCCESS" => "true",
+        "CONFIRM_SLACK_NOTIFICATION" => "true")
     )
     assert_equal "SUCCESS", result.fetch("status")
     assert_equal 1, calls(:notify_slack).length
@@ -1145,9 +1150,9 @@ class FlutterPlayStoreReleaseCoordinatorTest < Minitest::Test
 
   private
 
-  def release(target:, env:)
+  def release(target:, env:, **options)
     FPRS.release(
-      options: { distribution_target: target }, env: env,
+      options: options.merge(distribution_target: target), env: env,
       actions: @actions, project_root: @project
     )
   end

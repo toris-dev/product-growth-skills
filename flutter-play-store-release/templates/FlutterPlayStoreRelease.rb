@@ -329,13 +329,30 @@ module FlutterPlayStoreRelease
         begin
           normalized_options = symbolize_keys(options || {})
           environment = stringify_keys(env || {})
-          explicit_target = normalized_options[:distribution_target] || environment["DISTRIBUTION_TARGET"]
-          target = present(explicit_target)
+          explicit_target = present(normalized_options[:distribution_target])
+          if explicit_target.nil?
+            ambient_target = present(environment["DISTRIBUTION_TARGET"])
+            if !ambient_target.nil? && ambient_target != "play-store"
+              raise ConfigurationError,
+                "Firebase or dual delivery must be selected by an explicit lane option, not ambient DISTRIBUTION_TARGET"
+            end
+            if truthy?(environment["ENABLE_FIREBASE_APP_DISTRIBUTION"])
+              raise ConfigurationError,
+                "ambient ENABLE_FIREBASE_APP_DISTRIBUTION cannot expand an authorized Play release"
+            end
+            explicit_target = "play-store"
+          end
           steps = distribution_steps(
             target: explicit_target,
-            firebase_enabled: environment["ENABLE_FIREBASE_APP_DISTRIBUTION"]
+            firebase_enabled: false
           )
           target = steps == %w[play-store firebase] ? "both" : steps.first
+          if target == "both" && !truthy?(environment["CONFIRM_DUAL_DELIVERY"])
+            raise ConfigurationError,
+              "dual delivery requires explicit distribution_target:both and CONFIRM_DUAL_DELIVERY=true"
+          end
+          apply_authorized_release_policy!(normalized_options, environment, steps)
+          validate_retry_reconciliation!(normalized_options, environment, target)
           artifact_type = release_artifact_type(steps, environment)
           validate_release_policy!(steps, environment, artifact_type)
           root = canonical_directory(project_root, "project root")
@@ -876,6 +893,73 @@ module FlutterPlayStoreRelease
       end
     end
 
+    def apply_authorized_release_policy!(options, env, steps)
+      return unless steps.include?("play-store")
+
+      requested_status = present(options[:release_status])
+      requested_rollout = present(options[:rollout])
+      ambient_status = present(env["PLAY_STORE_RELEASE_STATUS"])
+      ambient_rollout = present(env["PLAY_STORE_ROLLOUT"])
+
+      if requested_status.nil?
+        if (!ambient_status.nil? && ambient_status != "completed") || !ambient_rollout.nil?
+          raise ConfigurationError,
+            "non-default Play release status or rollout must be an exact lane option with separate confirmation"
+        end
+        env["PLAY_STORE_RELEASE_STATUS"] = "completed"
+        env.delete("PLAY_STORE_ROLLOUT")
+        return
+      end
+
+      unless %w[completed draft inProgress].include?(requested_status)
+        raise ConfigurationError, "release status must be completed, draft, or inProgress"
+      end
+      if requested_status != "completed" && !truthy?(env["CONFIRM_PLAY_RELEASE_POLICY"])
+        raise ConfigurationError,
+          "non-default Play release status requires CONFIRM_PLAY_RELEASE_POLICY=true"
+      end
+      if requested_status == "inProgress"
+        if requested_rollout.nil? || !truthy?(env["CONFIRM_PLAY_RELEASE_POLICY"])
+          raise ConfigurationError,
+            "inProgress requires an exact rollout lane option and CONFIRM_PLAY_RELEASE_POLICY=true"
+        end
+        env["PLAY_STORE_ROLLOUT"] = requested_rollout
+      elsif requested_rollout
+        raise ConfigurationError, "rollout is accepted only with release_status:inProgress"
+      else
+        env.delete("PLAY_STORE_ROLLOUT")
+      end
+      env["PLAY_STORE_RELEASE_STATUS"] = requested_status
+    end
+
+    def validate_retry_reconciliation!(options, env, target)
+      return unless truthy?(env["RETRY_UNKNOWN_UPLOAD"])
+
+      unless truthy?(env["CONFIRM_UPLOAD_RECONCILED"])
+        raise ConfigurationError,
+          "unknown upload retry requires CONFIRM_UPLOAD_RECONCILED=true after provider reconciliation"
+      end
+      reconciled_version = normalize_version_name(env["RECONCILED_VERSION_NAME"])
+      requested_version = present(options[:version_name]) || present(env["VERSION_NAME"])
+      unless requested_version
+        raise ConfigurationError, "unknown upload retry requires an explicit version_name lane option or VERSION_NAME"
+      end
+      if reconciled_version != normalize_version_name(requested_version)
+        raise ConfigurationError, "reconciled version name must exactly match the requested release version"
+      end
+      validate_version_code(env["RECONCILED_VERSION_CODE"], source: "reconciled version code")
+      unless env["RECONCILED_ARTIFACT_SHA256"].to_s.match?(/\A[0-9a-f]{64}\z/)
+        raise ConfigurationError, "reconciled artifact SHA-256 must be exactly 64 lowercase hexadecimal characters"
+      end
+      expected_destinations = target == "both" ? "play-store,firebase" : target
+      unless env["RECONCILED_DESTINATIONS"].to_s == expected_destinations
+        raise ConfigurationError, "reconciled destinations must exactly match the authorized delivery target"
+      end
+      unless env["RECONCILED_PROVIDER_STATE"].to_s == "not-delivered"
+        raise ConfigurationError, "provider reconciliation must prove the exact prior upload was not delivered"
+      end
+    end
+
     def prepare_credentials(steps:, env:, project_root:, temp_root:, records:)
       credentials = {}
       if steps.include?("play-store")
@@ -1176,9 +1260,13 @@ module FlutterPlayStoreRelease
 
     def notify_if_requested(env, actions, result)
       return if env["SLACK_NOTIFICATION_OWNER"].to_s == "github-actions"
+      return if truthy?(env["RETRY_UNKNOWN_UPLOAD"])
+      return unless truthy?(env["CONFIRM_SLACK_NOTIFICATION"])
       webhook = present(env["SLACK_WEBHOOK_URL"])
       return unless webhook
-      notify = result["status"] == "SUCCESS" ? truthy?(env["SLACK_NOTIFY_SUCCESS"]) : truthy?(env["SLACK_NOTIFY_FAILURE"])
+      preference_name = result["status"] == "SUCCESS" ? "SLACK_NOTIFY_SUCCESS" : "SLACK_NOTIFY_FAILURE"
+      preference = present(env[preference_name])
+      notify = preference.nil? ? true : truthy?(preference)
       return unless notify
       payload = slack_payload(
         repository: env["GITHUB_REPOSITORY"], version: result["version"], track: result["track"],

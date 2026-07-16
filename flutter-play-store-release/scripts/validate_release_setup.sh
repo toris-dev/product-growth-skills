@@ -697,7 +697,13 @@ IGNORES
 
     configured_package=${APP_PACKAGE_NAME-}
     if [ -z "$configured_package" ]; then
-      fprs_validator_add "$(fprs_validator_context_level)" package_name 'APP_PACKAGE_NAME is not configured' 'export APP_PACKAGE_NAME=com.example.app'
+      if [ "$inspection_ok" = true ] && [ -n "$application_id" ] && [ "$application_id" != null ]; then
+        package_command="export APP_PACKAGE_NAME=$application_id"
+      else
+        package_command='export APP_PACKAGE_NAME=REPLACE_WITH_RESOLVED_APPLICATION_ID'
+      fi
+      fprs_validator_add "$(fprs_validator_context_level)" package_name \
+        'APP_PACKAGE_NAME is not configured' "$package_command"
     elif [ "$inspection_ok" != true ] || [ -z "$application_id" ] || [ "$application_id" = null ]; then
       fprs_validator_add "$(fprs_validator_context_level)" package_name 'Release application ID could not be resolved for comparison' './scripts/inspect_flutter_project.sh --project PATH --format human'
     elif [ "$configured_package" != "$application_id" ]; then
@@ -713,6 +719,17 @@ IGNORES
     esac
 
     workspace_properties="$project_root/android/key.properties"
+    workspace_properties_example="$project_root/android/key.properties.example"
+    signing_placeholder_pattern='replace-locally|/absolute/path/to/upload\.jks'
+    printf -v signing_create_command \
+      'test ! -e %q && test ! -L %q && install -m 600 %q %q && "${EDITOR:-vi}" %q && ! grep -Eq %q %q' \
+      "$workspace_properties" "$workspace_properties" \
+      "$workspace_properties_example" "$workspace_properties" \
+      "$workspace_properties" "$signing_placeholder_pattern" "$workspace_properties"
+    printf -v signing_edit_command \
+      'test -f %q && test ! -L %q && chmod 600 %q && "${EDITOR:-vi}" %q && ! grep -Eq %q %q' \
+      "$workspace_properties" "$workspace_properties" "$workspace_properties" \
+      "$workspace_properties" "$signing_placeholder_pattern" "$workspace_properties"
     signing_ci=false
     if fprs_is_truthy "${CI-}" || fprs_is_truthy "${GITHUB_ACTIONS-}"; then
       signing_ci=true
@@ -760,13 +777,13 @@ IGNORES
           signing_message='Local android/key.properties is complete and its keystore exists'
         else
           signing_level=$(fprs_validator_context_level)
-          signing_message="Local android/key.properties is incomplete or invalid: $properties_error"
-          signing_command='cp android/key.properties.example android/key.properties'
+          signing_message="Local android/key.properties is incomplete or invalid: $properties_error; preserve it, enforce mode 0600, and edit its values before retrying"
+          signing_command=$signing_edit_command
         fi
       else
         signing_level=$(fprs_validator_context_level)
-        signing_message='Android release signing input is incomplete'
-        signing_command='cp android/key.properties.example android/key.properties'
+        signing_message='Android release signing input is incomplete; create mode-0600 android/key.properties and replace every placeholder before retrying'
+        signing_command=$signing_create_command
       fi
     fi
     fprs_validator_add "$signing_level" signing "$signing_message" "$signing_command"
@@ -822,7 +839,12 @@ IGNORES
         fprs_validator_add PASS project.commands 'Authorized setup/build project command matrix completed without upload'
       fi
     else
-      fprs_validator_add WARN project.commands 'Project-mutating validation commands were not run; explicitly opt in from setup/build context' './scripts/validate_release_setup.sh --project PATH --context setup --run-project-commands'
+      printf -v project_commands_command \
+        '%q --project %q --context setup --run-project-commands' \
+        "$SCRIPT_DIR/validate_release_setup.sh" "$project_root"
+      fprs_validator_add WARN project.commands \
+        'Project-mutating validation commands were not run; explicitly opt in from setup/build context' \
+        "$project_commands_command"
     fi
   fi
 fi

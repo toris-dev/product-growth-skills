@@ -251,6 +251,10 @@ YAML
     esac
   done < "$TMP_ROOT/target-files.txt"
 
+  sed -n '/^if \[ "$#" -eq 0 \]/,/^else$/p' "$PACKAGE_ROOT/tests/run_tests.sh" \
+    | grep -Fx '  installation' >/dev/null 2>&1 ||
+    fail 'default/all test dispatch omitted the installation group'
+
   pass 'package_contract'
 }
 
@@ -4552,6 +4556,8 @@ bootstrap_core() {
     fail 'bootstrap did not classify the Gradle candidate as a merge'
   grep -F 'PLAN create android/Gemfile' "$BOOTSTRAP_LAST_STDOUT" >/dev/null 2>&1 ||
     fail 'bootstrap did not classify an absent generated target as create'
+  ! grep -E '^APPLY ' "$BOOTSTRAP_LAST_STDOUT" >/dev/null 2>&1 ||
+    fail 'bootstrap dry run reported applied changes'
 
   bootstrap_conflict_project="$BOOTSTRAP_ROOT/conflict project"
   inspection_make_minimal_kotlin "$bootstrap_conflict_project"
@@ -4595,6 +4601,12 @@ bootstrap_core() {
   inspection_make_minimal_kotlin "$bootstrap_apply_project"
   bootstrap_core_run 'fresh bootstrap apply failed' 0 \
     "$BOOTSTRAP" --project "$bootstrap_apply_project"
+  grep -F 'APPLY merge android/app/build.gradle.kts' \
+    "$BOOTSTRAP_LAST_STDOUT" >/dev/null 2>&1 ||
+    fail 'bootstrap apply did not report the committed Gradle merge'
+  grep -F 'APPLY create android/Gemfile' \
+    "$BOOTSTRAP_LAST_STDOUT" >/dev/null 2>&1 ||
+    fail 'bootstrap apply did not report the committed file creation'
   grep -F 'BEGIN flutter-play-store-release schema=1' \
     "$bootstrap_apply_project/android/app/build.gradle.kts" >/dev/null 2>&1 ||
     fail 'bootstrap apply did not install the Gradle signing candidate'
@@ -5840,6 +5852,14 @@ STUB
     fail 'doctor omitted the Fastlane-parity signing check name'
   grep -F 'WARN project.commands:' "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
     fail 'doctor did not report project commands as not run'
+  validator_project_resolved=$(CDPATH= cd -- "$validator_project" && pwd -P) ||
+    fail 'could not resolve validator fixture path'
+  printf -v validator_expected_project_command \
+    '%q --project %q --context setup --run-project-commands' \
+    "$VALIDATOR" "$validator_project_resolved"
+  grep -F "WARN project.commands: Project-mutating validation commands were not run; explicitly opt in from setup/build context | command: $validator_expected_project_command" \
+    "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'doctor did not recommend the skill-root validator with the resolved project path'
   grep -F 'python3 --version' "$validator_log" >/dev/null 2>&1 ||
     fail 'validator fabricated Python readiness without invoking its version check'
   grep -F 'bundle --version' "$validator_log" >/dev/null 2>&1 ||
@@ -5860,6 +5880,35 @@ STUB
   LC_ALL=C sort "$VALIDATOR_ROOT/check-names" > "$VALIDATOR_ROOT/check-names.sorted"
   assert_same_file "$VALIDATOR_ROOT/check-names.sorted" "$VALIDATOR_ROOT/check-names" \
     'human validator checks were not sorted by stable name'
+
+  release_validator_run 'resolved package recommendation failed' 0 env \
+    -u APP_PACKAGE_NAME "$validator_env" \
+    FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
+    "$VALIDATOR" --project "$validator_project"
+  grep -F 'WARN package_name: APP_PACKAGE_NAME is not configured | command: export APP_PACKAGE_NAME=com.example.kotlin' \
+    "$VALIDATOR_STDOUT" >/dev/null 2>&1 ||
+    fail 'missing package name did not recommend the resolved release application ID'
+  signing_recommendation=$(grep -F 'WARN signing:' "$VALIDATOR_STDOUT" || true)
+  case "$signing_recommendation" in
+    *'Android release signing input is incomplete; create mode-0600 android/key.properties and replace every placeholder before retrying'*' | command: '*) ;;
+    *) fail 'missing signing input did not explain safe creation and placeholder replacement' ;;
+  esac
+  signing_recommendation_command=${signing_recommendation#* | command: }
+  case "$signing_recommendation_command" in
+    *'install -m 600 '*'"${EDITOR:-vi}" '*'! grep -Eq '*) ;;
+    *) fail 'signing remediation did not enforce mode 0600, editing, and placeholder rejection' ;;
+  esac
+  if EDITOR=true bash -c "$signing_recommendation_command"; then
+    fail 'signing remediation succeeded without replacing template placeholders'
+  fi
+  [ -f "$validator_project/android/key.properties" ] ||
+    fail 'signing remediation did not create android/key.properties'
+  validator_key_properties_mode=$(stat -f '%Lp' \
+    "$validator_project/android/key.properties" 2>/dev/null ||
+    stat -c '%a' "$validator_project/android/key.properties")
+  [ "$validator_key_properties_mode" = 600 ] ||
+    fail "signing remediation created android/key.properties with mode $validator_key_properties_mode"
+  rm -f "$validator_project/android/key.properties"
 
   release_validator_run 'broken Python was fabricated as ready' 0 env "$validator_env" \
     FPRS_COMMAND_LOG="$validator_log" FPRS_FORBIDDEN_MARKER="$validator_forbidden" \
@@ -6863,6 +6912,7 @@ if [ "$#" -eq 0 ] || [ "${1-}" = all ]; then
   release_validator
   documentation
   repository_integration
+  installation
 else
   for requested_group in "$@"
   do

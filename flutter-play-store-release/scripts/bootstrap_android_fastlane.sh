@@ -925,6 +925,14 @@ fprs_project_transaction_validate fprs_bootstrap_validate_candidate || {
 fprs_project_transaction_commit
 bootstrap_status=$?
 [ "$bootstrap_status" -eq 0 ] || exit "$bootstrap_status"
+while IFS='|' read -r bootstrap_relative bootstrap_classification bootstrap_candidate bootstrap_managed
+do
+  case "$bootstrap_classification" in
+    create|update-owned|merge)
+      printf 'APPLY %s %s\n' "$bootstrap_classification" "$bootstrap_relative"
+      ;;
+  esac
+done < "$bootstrap_stage/plan"
 if [ "$bootstrap_incomplete" -eq 1 ]; then
   printf 'ERROR: release application ID is unresolved; choose a package or flavor before upload\n' >&2
   exit 1

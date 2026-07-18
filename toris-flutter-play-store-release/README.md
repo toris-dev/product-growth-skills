@@ -1,4 +1,4 @@
-# Flutter Play Store Release
+# Toris Flutter Play Store Release
 
 ## Purpose
 
@@ -8,8 +8,8 @@ The package favors local inspection and deterministic generated files. It does n
 
 ## Compatibility
 
-- Use Claude Code with `/flutter-play-store-release`.
-- Use Codex with `$flutter-play-store-release`.
+- Use Claude Code with `/toris-flutter-play-store-release`.
+- Use Codex with `$toris-flutter-play-store-release`.
 - Run the bundled Bash scripts on macOS or Linux.
 - Run the generated GitHub Actions workflow on Linux.
 - Use Windows PowerShell only for the documented secret-encoding command; the automation scripts do not support native Windows shells.
@@ -23,21 +23,36 @@ Run lifecycle commands from a trusted canonical package checkout. Installation c
 ```bash
 ./install.sh --dry-run
 ./install.sh
-./install.sh --source /path/to/flutter-play-store-release
-./update.sh --source /path/to/flutter-play-store-release --dry-run
-./update.sh --source /path/to/flutter-play-store-release
+./install.sh --source /path/to/toris-flutter-play-store-release
+./update.sh --source /path/to/toris-flutter-play-store-release --dry-run
+./update.sh --source /path/to/toris-flutter-play-store-release
 ./uninstall.sh --dry-run
 ./uninstall.sh --yes
 ```
 
 `install.sh` defaults to its physical package directory. `update.sh` requires an explicit canonical source. `uninstall.sh` requires `--yes` before mutation. Each command validates package identity, the allowlisted manifest, receipts, both destinations, and the shared lifecycle lock before changing an installed copy.
 
+## Rename migration
+
+If `flutter-play-store-release` is already installed, install and verify `toris-flutter-play-store-release` before removing anything. Confirm the new installer dry-run reports `would no change`, then invoke the verified legacy package's own uninstaller from whichever old global copy exists:
+
+```bash
+LEGACY_SKILL="$HOME/.agents/skills/flutter-play-store-release"
+if [ ! -x "$LEGACY_SKILL/uninstall.sh" ]; then
+  LEGACY_SKILL="$HOME/.claude/skills/flutter-play-store-release"
+fi
+"$LEGACY_SKILL/uninstall.sh" --dry-run
+"$LEGACY_SKILL/uninstall.sh" --yes
+```
+
+Do not delete the legacy directories manually. Its uninstaller validates both receipts and removes only the two verified old-name copies. Start a new agent task after migration so skill discovery refreshes.
+
 ## Direct scripts
 
 Set `SKILL_ROOT` to this package or an installed copy.
 
 ```bash
-SKILL_ROOT=/path/to/flutter-play-store-release
+SKILL_ROOT=/path/to/toris-flutter-play-store-release
 
 "$SKILL_ROOT/scripts/inspect_flutter_project.sh" \
   --project /path/to/app --format human
@@ -205,6 +220,8 @@ tool/flutter-play-store-release/install_flutter_sdk.sh
 tool/flutter-play-store-release/managed-files.sha256
 ```
 
+The invocable and globally installed package is `toris-flutter-play-store-release`. The `tool/flutter-play-store-release` path, sidecar package ID, and generated ownership markers intentionally retain their original project-internal namespace so previously bootstrapped projects remain safely updatable.
+
 The bootstrap also merges required ignore rules and marker-bounded signing hooks. It records hashes for fully owned files. It does not overwrite a populated secret file or silently take ownership of custom release signing.
 
 ## Validation
@@ -212,8 +229,8 @@ The bootstrap also merges required ignore rules and marker-bounded signing hooks
 Run package checks from the canonical repository:
 
 ```bash
-bash flutter-play-store-release/tests/run_tests.sh documentation
-python3 /path/to/skill-creator/scripts/quick_validate.py flutter-play-store-release
+bash toris-flutter-play-store-release/tests/run_tests.sh documentation
+python3 /path/to/skill-creator/scripts/quick_validate.py toris-flutter-play-store-release
 ```
 
 Run project checks after bootstrap:

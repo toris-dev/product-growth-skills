@@ -1,12 +1,12 @@
-# Flutter Play Store Release Skill — Design
+# Toris Flutter Play Store Release Skill — Design
 
 ## Objective
 
-Add `flutter-play-store-release` as the seventh skill in `product-growth-skills`, use that repository folder as the canonical source, and install verified copies into both global skill locations:
+Add `toris-flutter-play-store-release` as the seventh skill in `product-growth-skills`, use that repository folder as the canonical source, and install verified copies into both global skill locations:
 
 ```text
-~/.claude/skills/flutter-play-store-release/
-~/.agents/skills/flutter-play-store-release/
+~/.claude/skills/toris-flutter-play-store-release/
+~/.agents/skills/toris-flutter-play-store-release/
 ```
 
 The skill configures and validates reusable Flutter Android delivery through Fastlane and GitHub Actions. It covers Google Play, optional Firebase App Distribution, and optional Slack notifications. It excludes every iOS/App Store workflow.
@@ -25,7 +25,7 @@ Repository and skill documentation remain English. Agents return task results in
 ## Canonical package
 
 ```text
-flutter-play-store-release/
+toris-flutter-play-store-release/
 ├── .skill-package-id
 ├── SKILL.md
 ├── README.md
@@ -69,7 +69,7 @@ flutter-play-store-release/
     └── fixtures/ generated at test runtime
 ```
 
-The internal README is included because the user explicitly requires a standalone package usable outside an agent runtime. `SKILL.md` remains concise and routes detailed guidance to references and templates. Its YAML frontmatter must contain `name: flutter-play-store-release` and an English description equivalent to the deployment-focused description in the request. It includes English equivalents of the supplied natural-language use cases, all eight modes, and both Claude Code and Codex invocation forms.
+The internal README is included because the user explicitly requires a standalone package usable outside an agent runtime. `SKILL.md` remains concise and routes detailed guidance to references and templates. Its YAML frontmatter must contain `name: toris-flutter-play-store-release` and an English description equivalent to the deployment-focused description in the request. It includes English equivalents of the supplied natural-language use cases, all eight modes, and both Claude Code and Codex invocation forms.
 
 The scripts target macOS and Linux, remain compatible with the system Bash available on supported macOS versions, and do not assume GNU-only flags. Optional helpers such as Ruby, Python, `jq`, or a YAML parser improve validation but are never silently treated as mandatory unless the generated project workflow itself requires them.
 
@@ -81,8 +81,8 @@ Use copies rather than symlinks for maximum compatibility. `.skill-package-id` c
 - `update.sh` requires an explicit canonical source or a non-installed script location, performs the same validated synchronization, and refuses to treat either global destination as canonical.
 - `uninstall.sh` removes only destinations that identify themselves as this package; support `--dry-run` and require an explicit confirmation flag for non-interactive removal.
 - Exclude canonical-only tests, test artifacts, VCS metadata, caches, and local secrets from the install manifest.
-- Resolve and validate paths; mutate only the two exact global destinations, transaction-specific siblings inside their parents, and `$HOME/.flutter-play-store-release-install-state/` for the shared lock/journal. Refuse destination symlinks, source/destination overlap, unrelated directories, or identity-valid installations with an edited/missing manifest entry or any unexpected file, directory, or symlink. Remove clean support state after success.
-- Serialize install/update/uninstall with one shared atomic lock at `$HOME/.flutter-play-store-release-install-state/lock` inside a non-symlink mode-`0700` current-user state directory; its owner token prevents another process from removing it. Reclaim a same-host stale lock only after proving the recorded process is absent.
+- Resolve and validate paths; mutate only the two exact global destinations, transaction-specific siblings inside their parents, and `$HOME/.toris-flutter-play-store-release-install-state/` for the shared lock/journal. Refuse destination symlinks, source/destination overlap, unrelated directories, or identity-valid installations with an edited/missing manifest entry or any unexpected file, directory, or symlink. Remove clean support state after success.
+- Serialize install/update/uninstall with one shared atomic lock at `$HOME/.toris-flutter-play-store-release-install-state/lock` inside a non-symlink mode-`0700` current-user state directory; its owner token prevents another process from removing it. Reclaim a same-host stale lock only after proving the recorded process is absent.
 - Stage and validate both copies before replacing either. Persist an atomic phase journal with validated `package_id`, schema, `transaction_id`, operation, phase, prior-existence flags, and per-destination stage/rollback/quarantine paths; never source it as shell code. Retain rollback copies until both swaps/final validation succeed, then record `committed` before cleanup. Catchable pre-commit failures restore immediately; the next locked invocation restores old state for pre-commit journals, preserves new state and finishes cleanup for committed journals, or reports retained rollback paths when validation fails. Journal paths must match exact transaction-specific basenames beneath the two destination parents before any rename/delete.
 - Treat successful uninstall renames plus an atomic committed journal as the commit point. Failures before that restore both; a committed-journal recovery preserves absent destinations and finishes quarantine cleanup. Post-commit deletion is best effort, and undeleted paths/journal evidence are retained and reported rather than falsely claiming rollback.
 - Never uninstall the canonical source. Tests inject failures at every install/uninstall phase, kill a test process between swaps, and prove recovery preserves the exact prior states.
@@ -158,6 +158,8 @@ tool/flutter-play-store-release/managed-files.sha256
 .gitignore
 android/app/build.gradle or android/app/build.gradle.kts
 ```
+
+The public skill and global package identity are `toris-flutter-play-store-release`. Retain `tool/flutter-play-store-release`, the sidecar package ID, and generated ownership markers as the stable project-internal namespace so projects created before the public rename remain recognizable and safely updatable.
 
 Safety requirements:
 
@@ -431,7 +433,7 @@ Tests never need real Google, Firebase, Slack, or GitHub credentials and never c
 
 ## Repository integration
 
-- Add `flutter-play-store-release` to the repository validator's expected set and update the exact skill count from six to seven.
+- Add `toris-flutter-play-store-release` to the repository validator's expected set and update the exact skill count from six to seven.
 - Update the root README introduction, skill table, install loop, personal prompt examples, structure tree, and validation examples.
 - Keep the existing six skills unchanged except where a count or installation loop must change.
 - Add a new design and implementation plan rather than rewriting historical design records that accurately describe earlier repository states.

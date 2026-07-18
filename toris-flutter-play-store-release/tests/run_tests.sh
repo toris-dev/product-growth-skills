@@ -5,7 +5,7 @@ set -u
 
 TESTS_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PACKAGE_ROOT=$(CDPATH= cd -- "$TESTS_DIR/.." && pwd)
-TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/flutter-play-store-release-tests.XXXXXX") || {
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/toris-flutter-play-store-release-tests.XXXXXX") || {
   printf 'FAIL: could not create a temporary test directory\n' >&2
   exit 1
 }
@@ -164,7 +164,7 @@ package_contract() {
   inventory_package_files
 
   printf '%s\n' \
-    'package_id=flutter-play-store-release' \
+    'package_id=toris-flutter-play-store-release' \
     'schema_version=1' > "$TMP_ROOT/expected-package-id"
   assert_same_file \
     "$TMP_ROOT/expected-package-id" \
@@ -173,9 +173,9 @@ package_contract() {
 
   cat > "$TMP_ROOT/expected-openai.yaml" <<'YAML'
 interface:
-  display_name: "Flutter Play Store Release"
+  display_name: "Toris Flutter Play Store Release"
   short_description: "Automate safe Flutter releases to Google Play"
-  default_prompt: "Use $flutter-play-store-release to inspect this Flutter app, configure safe Android delivery, and verify the Google Play release setup."
+  default_prompt: "Use $toris-flutter-play-store-release to inspect this Flutter app, configure safe Android delivery, and verify the Google Play release setup."
 YAML
   assert_same_file \
     "$TMP_ROOT/expected-openai.yaml" \
@@ -184,7 +184,7 @@ YAML
 
   [ "$(sed -n '1p' "$PACKAGE_ROOT/SKILL.md")" = '---' ] ||
     fail 'SKILL.md must start with YAML frontmatter'
-  [ "$(sed -n '2p' "$PACKAGE_ROOT/SKILL.md")" = 'name: flutter-play-store-release' ] ||
+  [ "$(sed -n '2p' "$PACKAGE_ROOT/SKILL.md")" = 'name: toris-flutter-play-store-release' ] ||
     fail 'SKILL.md frontmatter must declare the canonical name first'
   description_line=$(sed -n '3p' "$PACKAGE_ROOT/SKILL.md")
   case "$description_line" in
@@ -5795,7 +5795,7 @@ RUBY
   }
 
   workflow_validate_case 'lightweight release tag was rejected' 0 release v1.2.3 '' internal completed play-store notes
-  [ "$(cat "$WORKFLOW_LAST_VALIDATE_ROOT/flutter-play-store-release-inputs/version_name")" = v1.2.3 ] ||
+  [ "$(cat "$WORKFLOW_LAST_VALIDATE_ROOT/toris-flutter-play-store-release-inputs/version_name")" = v1.2.3 ] ||
     fail 'lightweight release tag was not used as version name'
   workflow_validate_case 'annotated release tag was rejected' 0 release v1.2.4 '' internal completed play-store notes
   workflow_validate_case 'mismatched release tag was accepted' 1 release v1.2.5 '' internal completed play-store notes
@@ -5815,16 +5815,16 @@ RUBY
     fail 'manual validation changed the native triggering SHA'
   printf '%s' "$workflow_notes_canary" > "$workflow_harness/notes.expected"
   assert_same_file "$workflow_harness/notes.expected" \
-    "$WORKFLOW_LAST_VALIDATE_ROOT/flutter-play-store-release-inputs/firebase_release_notes" \
+    "$WORKFLOW_LAST_VALIDATE_ROOT/toris-flutter-play-store-release-inputs/firebase_release_notes" \
     'Firebase notes injection canary was not preserved as inert data'
   [ ! -e "$workflow_injection_marker" ] || fail 'Firebase notes injection canary executed'
 
   workflow_validate_case 'exact retry tuple was not stored' 0 workflow_dispatch '' \
     v2.0.0 internal completed play-store notes true true v2.0.0 42 \
     "$workflow_retry_sha" play-store not-delivered
-  [ "$(cat "$WORKFLOW_LAST_VALIDATE_ROOT/flutter-play-store-release-inputs/retry_unknown")" = true ] ||
+  [ "$(cat "$WORKFLOW_LAST_VALIDATE_ROOT/toris-flutter-play-store-release-inputs/retry_unknown")" = true ] ||
     fail 'validated retry marker was not stored'
-  [ "$(cat "$WORKFLOW_LAST_VALIDATE_ROOT/flutter-play-store-release-inputs/reconciled_version_code")" = 42 ] ||
+  [ "$(cat "$WORKFLOW_LAST_VALIDATE_ROOT/toris-flutter-play-store-release-inputs/reconciled_version_code")" = 42 ] ||
     fail 'validated reconciliation version code was not stored'
   workflow_validate_case 'validation accepted a reconciled version code above Play maximum' 1 \
     workflow_dispatch '' v2.0.0 internal completed play-store notes true true v2.0.0 \
@@ -6395,7 +6395,7 @@ references/troubleshooting.md'
   [ "$skill_lines" -lt 500 ] || fail 'SKILL.md must remain under 500 lines'
   [ "$(sed -n '1p' "$PACKAGE_ROOT/SKILL.md")" = '---' ] ||
     fail 'SKILL.md must start with YAML frontmatter'
-  [ "$(sed -n '2p' "$PACKAGE_ROOT/SKILL.md")" = 'name: flutter-play-store-release' ] ||
+  [ "$(sed -n '2p' "$PACKAGE_ROOT/SKILL.md")" = 'name: toris-flutter-play-store-release' ] ||
     fail 'SKILL.md must declare only the canonical name first'
   case "$(sed -n '3p' "$PACKAGE_ROOT/SKILL.md")" in
     'description: '[A-Za-z]*) ;;
@@ -6429,8 +6429,8 @@ references/troubleshooting.md'
   do
     assert_contains 'SKILL.md' "$use_case"
   done
-  assert_contains 'SKILL.md' '/flutter-play-store-release'
-  assert_contains 'SKILL.md' '$flutter-play-store-release'
+  assert_contains 'SKILL.md' '/toris-flutter-play-store-release'
+  assert_contains 'SKILL.md' '$toris-flutter-play-store-release'
   assert_contains 'SKILL.md' 'Android only'
   assert_contains 'SKILL.md' 'Inspect before editing.'
   assert_contains 'SKILL.md' 'Do not upload'
@@ -6441,7 +6441,7 @@ references/troubleshooting.md'
 
   for section in \
     '## Purpose' '## Compatibility' '## Install, update, and uninstall' \
-    '## Direct scripts' '## Example prompts' '## Modes' '## Safety' \
+    '## Rename migration' '## Direct scripts' '## Example prompts' '## Modes' '## Safety' \
     '## Generated files' '## Validation' '## Limitations' '## Sources'
   do
     assert_contains 'README.md' "$section"
@@ -6520,11 +6520,12 @@ repository_integration() {
 
   for expected_text in \
     'packages seven reusable agent skills' \
-    '[`flutter-play-store-release`](flutter-play-store-release/)' \
-    'expo-interactive-design flutter-play-store-release; do' \
-    'Use $flutter-play-store-release' \
-    '├── flutter-play-store-release/' \
-    'bash flutter-play-store-release/tests/run_tests.sh'
+    '[`toris-flutter-play-store-release`](toris-flutter-play-store-release/)' \
+    'expo-interactive-design toris-flutter-play-store-release; do' \
+    'Use $toris-flutter-play-store-release' \
+    '├── toris-flutter-play-store-release/' \
+    'bash toris-flutter-play-store-release/tests/run_tests.sh' \
+    'LEGACY_SKILL="$HOME/.agents/skills/flutter-play-store-release"'
   do
     grep -F -- "$expected_text" "$repository_readme" >/dev/null 2>&1 ||
       fail "repository README does not contain: $expected_text"
@@ -6555,8 +6556,8 @@ installation() {
     fail 'initial dual-destination installation failed'
   fi
 
-  installation_claude="$INSTALLATION_HOME/.claude/skills/flutter-play-store-release"
-  installation_agents="$INSTALLATION_HOME/.agents/skills/flutter-play-store-release"
+  installation_claude="$INSTALLATION_HOME/.claude/skills/toris-flutter-play-store-release"
+  installation_agents="$INSTALLATION_HOME/.agents/skills/toris-flutter-play-store-release"
   assert_file_path() {
     [ -f "$1" ] && [ ! -L "$1" ] || fail "$2"
   }
@@ -6620,8 +6621,8 @@ installation() {
     fi
     HOME="$phase_home" "$PACKAGE_ROOT/update.sh" --source "$INSTALLATION_ROOT/missing-source" \
       > /dev/null 2>&1 && fail "invalid source unexpectedly succeeded: $installation_phase"
-    phase_claude="$phase_home/.claude/skills/flutter-play-store-release/README.md"
-    phase_agents="$phase_home/.agents/skills/flutter-play-store-release/README.md"
+    phase_claude="$phase_home/.claude/skills/toris-flutter-play-store-release/README.md"
+    phase_agents="$phase_home/.agents/skills/toris-flutter-play-store-release/README.md"
     assert_same_file "$phase_claude" "$phase_agents" \
       "recovery split installed copies: $installation_phase"
     if [ "$installation_phase" = committed ]; then
@@ -6631,7 +6632,7 @@ installation() {
       assert_same_file "$PACKAGE_ROOT/README.md" "$phase_claude" \
         "pre-commit recovery did not restore the prior copy: $installation_phase"
     fi
-    [ ! -e "$phase_home/.flutter-play-store-release-install-state/transaction" ] ||
+    [ ! -e "$phase_home/.toris-flutter-play-store-release-install-state/transaction" ] ||
       fail "recovery journal remained after phase recovery: $installation_phase"
   done
 
@@ -6656,8 +6657,8 @@ installation() {
     signal_status=$?
     [ "$signal_status" -eq 3 ] ||
       fail "catchable signal did not return status 3 at $installation_phase (got $signal_status)"
-    signal_claude="$signal_home/.claude/skills/flutter-play-store-release/README.md"
-    signal_agents="$signal_home/.agents/skills/flutter-play-store-release/README.md"
+    signal_claude="$signal_home/.claude/skills/toris-flutter-play-store-release/README.md"
+    signal_agents="$signal_home/.agents/skills/toris-flutter-play-store-release/README.md"
     assert_same_file "$signal_claude" "$signal_agents" \
       "catchable signal split installed copies: $installation_phase"
     if [ "$installation_phase" = committed ]; then
@@ -6698,15 +6699,15 @@ installation() {
     fail 'self-update fixture install failed'
   installation_expect_status 2 'installed-copy self-update was accepted' \
     env HOME="$self_home" "$PACKAGE_ROOT/update.sh" \
-    --source "$self_home/.claude/skills/flutter-play-store-release"
+    --source "$self_home/.claude/skills/toris-flutter-play-store-release"
   symlink_home="$INSTALLATION_ROOT/destination-symlink-home"
   mkdir -p "$symlink_home/.claude/skills" "$symlink_home/unrelated"
-  ln -s "$symlink_home/unrelated" "$symlink_home/.claude/skills/flutter-play-store-release"
+  ln -s "$symlink_home/unrelated" "$symlink_home/.claude/skills/toris-flutter-play-store-release"
   installation_expect_status 2 'destination symlink was accepted' \
     env HOME="$symlink_home" "$PACKAGE_ROOT/install.sh" --source "$PACKAGE_ROOT"
   unrelated_home="$INSTALLATION_ROOT/unrelated-destination-home"
-  mkdir -p "$unrelated_home/.agents/skills/flutter-play-store-release"
-  printf 'foreign\n' > "$unrelated_home/.agents/skills/flutter-play-store-release/foreign.txt"
+  mkdir -p "$unrelated_home/.agents/skills/toris-flutter-play-store-release"
+  printf 'foreign\n' > "$unrelated_home/.agents/skills/toris-flutter-play-store-release/foreign.txt"
   installation_expect_status 2 'unrelated destination directory was accepted' \
     env HOME="$unrelated_home" "$PACKAGE_ROOT/install.sh" --source "$PACKAGE_ROOT"
 
@@ -6744,7 +6745,7 @@ installation() {
     mkdir -p "$tree_home"
     HOME="$tree_home" "$PACKAGE_ROOT/install.sh" --source "$PACKAGE_ROOT" > /dev/null 2>&1 ||
       fail "tree fixture install failed: $tree_case"
-    tree_destination="$tree_home/.claude/skills/flutter-play-store-release"
+    tree_destination="$tree_home/.claude/skills/toris-flutter-play-store-release"
     case "$tree_case" in
       receipt-mode) chmod 600 "$tree_destination/.skill-install-receipt" ;;
       unexpected-file) printf 'unexpected\n' > "$tree_destination/unexpected.txt" ;;
@@ -6761,11 +6762,11 @@ installation() {
   installation_expect_status 0 'install dry-run failed' \
     env HOME="$dry_home" "$PACKAGE_ROOT/install.sh" --source "$PACKAGE_ROOT" --dry-run
   [ ! -e "$dry_home/.claude" ] && [ ! -e "$dry_home/.agents" ] &&
-    [ ! -e "$dry_home/.flutter-play-store-release-install-state" ] ||
+    [ ! -e "$dry_home/.toris-flutter-play-store-release-install-state" ] ||
     fail 'install dry-run wrote lifecycle state'
   HOME="$dry_home" "$PACKAGE_ROOT/install.sh" --source "$PACKAGE_ROOT" > /dev/null 2>&1 ||
     fail 'idempotency fixture install failed'
-  dry_receipt="$dry_home/.claude/skills/flutter-play-store-release/.skill-install-receipt"
+  dry_receipt="$dry_home/.claude/skills/toris-flutter-play-store-release/.skill-install-receipt"
   if dry_inode=$(stat -f '%i' "$dry_receipt" 2>/dev/null); then :;
   else dry_inode=$(stat -c '%i' "$dry_receipt") || fail 'could not read receipt inode'; fi
   HOME="$dry_home" "$PACKAGE_ROOT/install.sh" --source "$PACKAGE_ROOT" > /dev/null 2>&1 ||
@@ -6777,11 +6778,11 @@ installation() {
     env HOME="$dry_home" "$PACKAGE_ROOT/update.sh" \
     --source "$INSTALLATION_RECOVERY_SOURCE" --dry-run
   assert_same_file "$PACKAGE_ROOT/README.md" \
-    "$dry_home/.claude/skills/flutter-play-store-release/README.md" \
+    "$dry_home/.claude/skills/toris-flutter-play-store-release/README.md" \
     'update dry-run changed an installed copy'
   installation_expect_status 0 'uninstall dry-run failed' \
     env HOME="$dry_home" "$PACKAGE_ROOT/uninstall.sh" --dry-run
-  [ -d "$dry_home/.claude/skills/flutter-play-store-release" ] ||
+  [ -d "$dry_home/.claude/skills/toris-flutter-play-store-release" ] ||
     fail 'uninstall dry-run removed an installed copy'
 
   # Same-host lock ownership: dead and PID-reused owners are reclaimable;
@@ -6790,7 +6791,7 @@ installation() {
   for lock_case in dead reused foreign
   do
     lock_home="$INSTALLATION_ROOT/lock-home-$lock_case"
-    lock_root="$lock_home/.flutter-play-store-release-install-state"
+    lock_root="$lock_home/.toris-flutter-play-store-release-install-state"
     mkdir -p "$lock_root/lock"
     chmod 700 "$lock_root" "$lock_root/lock"
     lock_pid=999999
@@ -6840,7 +6841,7 @@ installation() {
   [ "$contention_status" -eq 3 ] ||
     fail "entrypoint signal forwarding returned $contention_status instead of 3"
   assert_same_file "$PACKAGE_ROOT/README.md" \
-    "$contention_home/.claude/skills/flutter-play-store-release/README.md" \
+    "$contention_home/.claude/skills/toris-flutter-play-store-release/README.md" \
     'entrypoint signal did not restore the prior Claude copy'
 
   # Uninstall accepts absent, one-sided, identical, and independently valid
@@ -6856,20 +6857,20 @@ installation() {
     HOME="$uninstall_home" "$PACKAGE_ROOT/install.sh" --source "$PACKAGE_ROOT" > /dev/null 2>&1 ||
       fail "uninstall fixture install failed: $uninstall_case"
     if [ "$uninstall_case" = one-sided ]; then
-      rm -rf "$uninstall_home/.agents/skills/flutter-play-store-release"
+      rm -rf "$uninstall_home/.agents/skills/toris-flutter-play-store-release"
     elif [ "$uninstall_case" = divergent ]; then
       divergent_home="$INSTALLATION_ROOT/divergent-source-home"
       mkdir -p "$divergent_home"
       HOME="$divergent_home" "$PACKAGE_ROOT/install.sh" --source "$INSTALLATION_RECOVERY_SOURCE" \
         > /dev/null 2>&1 || fail 'divergent fixture install failed'
-      rm -rf "$uninstall_home/.agents/skills/flutter-play-store-release"
-      mv "$divergent_home/.agents/skills/flutter-play-store-release" \
-        "$uninstall_home/.agents/skills/flutter-play-store-release"
+      rm -rf "$uninstall_home/.agents/skills/toris-flutter-play-store-release"
+      mv "$divergent_home/.agents/skills/toris-flutter-play-store-release" \
+        "$uninstall_home/.agents/skills/toris-flutter-play-store-release"
     fi
     installation_expect_status 0 "verified uninstall failed: $uninstall_case" \
       env HOME="$uninstall_home" "$PACKAGE_ROOT/uninstall.sh" --yes
-    [ ! -e "$uninstall_home/.claude/skills/flutter-play-store-release" ] &&
-      [ ! -e "$uninstall_home/.agents/skills/flutter-play-store-release" ] ||
+    [ ! -e "$uninstall_home/.claude/skills/toris-flutter-play-store-release" ] &&
+      [ ! -e "$uninstall_home/.agents/skills/toris-flutter-play-store-release" ] ||
       fail "uninstall left a canonical destination: $uninstall_case"
   done
 
@@ -6882,8 +6883,8 @@ installation() {
     installation_expect_status 3 "uninstall rename failure did not roll back: $uninstall_role" \
       env HOME="$rename_home" FPRS_TEST_MODE=1 \
       FPRS_TEST_FAIL_UNINSTALL_SWAP="$uninstall_role" "$PACKAGE_ROOT/uninstall.sh" --yes
-    [ -d "$rename_home/.claude/skills/flutter-play-store-release" ] &&
-      [ -d "$rename_home/.agents/skills/flutter-play-store-release" ] ||
+    [ -d "$rename_home/.claude/skills/toris-flutter-play-store-release" ] &&
+      [ -d "$rename_home/.agents/skills/toris-flutter-play-store-release" ] ||
       fail "uninstall rename failure split destinations: $uninstall_role"
   done
 
@@ -6903,12 +6904,12 @@ installation() {
       FPRS_TEST_SIGNAL_INSTALL_PHASE="$uninstall_phase" \
       FPRS_TEST_SIGNAL_NAME="$uninstall_signal_name" "$PACKAGE_ROOT/uninstall.sh" --yes
     if [ "$uninstall_phase" = committed ] || [ "$uninstall_phase" = cleanup_complete ]; then
-      [ ! -e "$uninstall_signal_home/.claude/skills/flutter-play-store-release" ] &&
-        [ ! -e "$uninstall_signal_home/.agents/skills/flutter-play-store-release" ] ||
+      [ ! -e "$uninstall_signal_home/.claude/skills/toris-flutter-play-store-release" ] &&
+        [ ! -e "$uninstall_signal_home/.agents/skills/toris-flutter-play-store-release" ] ||
         fail "committed uninstall signal restored a destination: $uninstall_phase"
     else
-      [ -d "$uninstall_signal_home/.claude/skills/flutter-play-store-release" ] &&
-        [ -d "$uninstall_signal_home/.agents/skills/flutter-play-store-release" ] ||
+      [ -d "$uninstall_signal_home/.claude/skills/toris-flutter-play-store-release" ] &&
+        [ -d "$uninstall_signal_home/.agents/skills/toris-flutter-play-store-release" ] ||
         fail "pre-commit uninstall signal split destinations: $uninstall_phase"
     fi
   done
@@ -6924,8 +6925,8 @@ installation() {
       "$PACKAGE_ROOT/uninstall.sh" --yes > /dev/null 2>&1
     cleanup_status=$?
     [ "$cleanup_status" -ne 0 ] || fail "cleanup failure was ignored: $cleanup_role"
-    [ ! -e "$cleanup_home/.claude/skills/flutter-play-store-release" ] &&
-      [ ! -e "$cleanup_home/.agents/skills/flutter-play-store-release" ] ||
+    [ ! -e "$cleanup_home/.claude/skills/toris-flutter-play-store-release" ] &&
+      [ ! -e "$cleanup_home/.agents/skills/toris-flutter-play-store-release" ] ||
       fail "post-commit cleanup failure restored destinations: $cleanup_role"
     installation_expect_status 0 "cleanup recovery failed: $cleanup_role" \
       env HOME="$cleanup_home" "$PACKAGE_ROOT/uninstall.sh" --yes
@@ -6948,15 +6949,15 @@ installation() {
     if [ "$uninstall_kill_phase" = committed ] ||
       [ "$uninstall_kill_phase" = cleanup_complete ]
     then
-      [ ! -e "$kill_home/.claude/skills/flutter-play-store-release" ] &&
-        [ ! -e "$kill_home/.agents/skills/flutter-play-store-release" ] ||
+      [ ! -e "$kill_home/.claude/skills/toris-flutter-play-store-release" ] &&
+        [ ! -e "$kill_home/.agents/skills/toris-flutter-play-store-release" ] ||
         fail "committed uninstall kill restored a destination: $uninstall_kill_phase"
     else
-      [ -d "$kill_home/.claude/skills/flutter-play-store-release" ] &&
-        [ -d "$kill_home/.agents/skills/flutter-play-store-release" ] ||
+      [ -d "$kill_home/.claude/skills/toris-flutter-play-store-release" ] &&
+        [ -d "$kill_home/.agents/skills/toris-flutter-play-store-release" ] ||
         fail "pre-commit uninstall kill did not restore both copies: $uninstall_kill_phase"
     fi
-    [ ! -e "$kill_home/.flutter-play-store-release-install-state/transaction" ] ||
+    [ ! -e "$kill_home/.toris-flutter-play-store-release-install-state/transaction" ] ||
       fail "uninstall recovery retained its journal: $uninstall_kill_phase"
   done
 
@@ -6971,7 +6972,7 @@ installation() {
       > /dev/null 2>&1
     journal_status=$?
     [ "$journal_status" -ne 0 ] || fail "journal fixture was not interrupted: $journal_case"
-    journal_path="$journal_home/.flutter-play-store-release-install-state/transaction"
+    journal_path="$journal_home/.toris-flutter-play-store-release-install-state/transaction"
     [ -f "$journal_path" ] || fail "journal fixture is missing: $journal_case"
     case "$journal_case" in
       unknown) printf 'unknown_key=value\n' >> "$journal_path" ;;
@@ -6999,7 +7000,7 @@ installation() {
     installation_expect_status 2 "tampered journal was accepted: $journal_case" \
       env HOME="$journal_home" "$PACKAGE_ROOT/update.sh" --source "$INSTALLATION_RECOVERY_SOURCE"
     assert_same_file "$PACKAGE_ROOT/README.md" \
-      "$journal_home/.claude/skills/flutter-play-store-release/README.md" \
+      "$journal_home/.claude/skills/toris-flutter-play-store-release/README.md" \
       "tampered journal mutated the canonical destination: $journal_case"
     [ -e "$journal_path" ] || fail "tampered journal evidence was deleted: $journal_case"
   done

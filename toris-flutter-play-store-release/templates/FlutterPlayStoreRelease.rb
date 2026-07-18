@@ -360,7 +360,7 @@ module FlutterPlayStoreRelease
           root = canonical_directory(project_root, "project root")
           doctor(env: environment, target: target, context: "deploy", actions: actions, project_root: root)
 
-          temp_root = Dir.mktmpdir("flutter-play-store-release-")
+          temp_root = Dir.mktmpdir("toris-flutter-play-store-release-")
           File.chmod(0o700, temp_root)
           credentials = prepare_credentials(
             steps: steps, env: environment, project_root: root,

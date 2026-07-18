@@ -301,7 +301,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          input_root="$RUNNER_TEMP/flutter-play-store-release-inputs"
+          input_root="$RUNNER_TEMP/toris-flutter-play-store-release-inputs"
           [[ ! -e "$input_root" ]]
           install -d -m 700 "$input_root"
           release_tag="$RELEASE_TAG"
@@ -458,7 +458,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          flutter_version=$(cat "$RUNNER_TEMP/flutter-play-store-release-inputs/flutter_version")
+          flutter_version=$(cat "$RUNNER_TEMP/toris-flutter-play-store-release-inputs/flutter_version")
           tool/flutter-play-store-release/install_flutter_sdk.sh \
             --version "$flutter_version" \
             --channel stable \
@@ -499,8 +499,8 @@ jobs:
             printf 'Refusing to overwrite or remove existing android/key.properties.\n' >&2
             exit 1
           }
-          input_root="$RUNNER_TEMP/flutter-play-store-release-inputs"
-          secret_root="$RUNNER_TEMP/flutter-play-store-release-secrets"
+          input_root="$RUNNER_TEMP/toris-flutter-play-store-release-inputs"
+          secret_root="$RUNNER_TEMP/toris-flutter-play-store-release-secrets"
           [[ ! -e "$secret_root" ]]
           install -d -m 700 "$secret_root"
           target=$(cat "$input_root/distribution_target")
@@ -585,8 +585,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          input_root="$RUNNER_TEMP/flutter-play-store-release-inputs"
-          secret_root="$RUNNER_TEMP/flutter-play-store-release-secrets"
+          input_root="$RUNNER_TEMP/toris-flutter-play-store-release-inputs"
+          secret_root="$RUNNER_TEMP/toris-flutter-play-store-release-secrets"
           DISTRIBUTION_TARGET=$(cat "$input_root/distribution_target")
           APP_PACKAGE_NAME=$(cat "$secret_root/app-package-name")
           ANDROID_KEY_PROPERTIES_PATH="$secret_root/key.properties"
@@ -614,8 +614,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          input_root="$RUNNER_TEMP/flutter-play-store-release-inputs"
-          secret_root="$RUNNER_TEMP/flutter-play-store-release-secrets"
+          input_root="$RUNNER_TEMP/toris-flutter-play-store-release-inputs"
+          secret_root="$RUNNER_TEMP/toris-flutter-play-store-release-secrets"
           VERSION_NAME=$(cat "$input_root/version_name")
           PLAY_STORE_TRACK=$(cat "$input_root/track")
           PLAY_STORE_RELEASE_STATUS=$(cat "$input_root/release_status")
@@ -707,11 +707,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$(cat "$RUNNER_TEMP/flutter-play-store-release-inputs/confirm_slack")" == "true" ]] || exit 0
-          [[ "$(cat "$RUNNER_TEMP/flutter-play-store-release-inputs/retry_unknown")" == "false" ]] || exit 0
+          [[ "$(cat "$RUNNER_TEMP/toris-flutter-play-store-release-inputs/confirm_slack")" == "true" ]] || exit 0
+          [[ "$(cat "$RUNNER_TEMP/toris-flutter-play-store-release-inputs/retry_unknown")" == "false" ]] || exit 0
           [[ "${GITHUB_RUN_ATTEMPT:-1}" == "1" ]] || exit 0
           [[ -n "$SLACK_WEBHOOK_URL" ]] || exit 0
-          notify_root="$RUNNER_TEMP/flutter-play-store-release-notification"
+          notify_root="$RUNNER_TEMP/toris-flutter-play-store-release-notification"
           install -d -m 700 "$notify_root"
           trap 'rm -rf -- "$notify_root"' EXIT HUP INT TERM
           RESULT_PATH="$RELEASE_RESULT_PATH" PAYLOAD_PATH="$notify_root/payload.json" \
@@ -749,7 +749,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf -- \
-            "$RUNNER_TEMP/flutter-play-store-release-secrets" \
-            "$RUNNER_TEMP/flutter-play-store-release-inputs" \
-            "$RUNNER_TEMP/flutter-play-store-release-notification"
+            "$RUNNER_TEMP/toris-flutter-play-store-release-secrets" \
+            "$RUNNER_TEMP/toris-flutter-play-store-release-inputs" \
+            "$RUNNER_TEMP/toris-flutter-play-store-release-notification"
           rm -f -- "$RELEASE_RESULT_PATH"

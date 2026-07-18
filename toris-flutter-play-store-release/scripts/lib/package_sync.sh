@@ -31,13 +31,13 @@ import sys
 import time
 import uuid
 
-PACKAGE_ID = "flutter-play-store-release"
+PACKAGE_ID = "toris-flutter-play-store-release"
 SCHEMA = "1"
 RECEIPT = ".skill-install-receipt"
-STATE_NAME = ".flutter-play-store-release-install-state"
+STATE_NAME = ".toris-flutter-play-store-release-install-state"
 MANIFEST = "install-manifest.txt"
 IDENTITY = ".skill-package-id"
-EXPECTED_IDENTITY = b"package_id=flutter-play-store-release\nschema_version=1\n"
+EXPECTED_IDENTITY = b"package_id=toris-flutter-play-store-release\nschema_version=1\n"
 REQUIRED_EXECUTABLES = {
     "install.sh", "update.sh", "uninstall.sh",
     "scripts/bootstrap_android_fastlane.sh",

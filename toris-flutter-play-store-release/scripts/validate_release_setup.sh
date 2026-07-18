@@ -70,13 +70,13 @@ if [ "$run_project_commands" = true ]; then
   [ -n "$project" ] || fprs_validator_bad_argument '--run-project-commands requires --project'
 fi
 
-validator_tmp=$(mktemp -d "${TMPDIR:-/tmp}/flutter-play-store-release-validator.XXXXXX") || {
+validator_tmp=$(mktemp -d "${TMPDIR:-/tmp}/toris-flutter-play-store-release-validator.XXXXXX") || {
   printf 'ERROR: could not create validator temporary storage\n' >&2
   exit 1
 }
 validator_cleanup() {
   case "$validator_tmp" in
-    "${TMPDIR:-/tmp}"/flutter-play-store-release-validator.*) rm -rf -- "$validator_tmp" ;;
+    "${TMPDIR:-/tmp}"/toris-flutter-play-store-release-validator.*) rm -rf -- "$validator_tmp" ;;
   esac
 }
 trap validator_cleanup EXIT HUP INT TERM

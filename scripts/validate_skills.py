@@ -17,9 +17,9 @@ EXPECTED = {
     "flutter-interactive-design",
     "expo-android-performance",
     "expo-interactive-design",
-    "flutter-play-store-release",
+    "toris-flutter-play-store-release",
 }
-STANDALONE_SKILL = "flutter-play-store-release"
+STANDALONE_SKILL = "toris-flutter-play-store-release"
 REQUIRED_INTERFACE_KEYS = ("display_name", "short_description", "default_prompt")
 IGNORED_SCAN_ROOTS = {
     ROOT / ".git",

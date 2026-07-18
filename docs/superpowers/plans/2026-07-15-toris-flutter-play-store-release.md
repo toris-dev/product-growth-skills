@@ -1,10 +1,10 @@
-# Flutter Play Store Release Skill Implementation Plan
+# Toris Flutter Play Store Release Skill Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a production-quality, reusable `flutter-play-store-release` skill as the seventh package in this repository, verify it without contacting external deployment systems, install byte-identical copies for Claude Code and Codex, and publish the completed repository state.
+**Goal:** Add a production-quality, reusable `toris-flutter-play-store-release` skill as the seventh package in this repository, verify it without contacting external deployment systems, install byte-identical copies for Claude Code and Codex, and publish the completed repository state.
 
-**Architecture:** Keep `/Users/toris/projects/product-growth-skills/flutter-play-store-release/` as the only canonical source. Portable Bash entrypoints inspect and bootstrap Flutter projects transactionally; a generated, pinned Fastlane package owns release orchestration; a SHA-pinned GitHub Actions workflow restores secrets only in runner-temporary storage; fixture tests stub all external commands. Manifest-driven installers stage both global copies and roll both back if either destination swap fails.
+**Architecture:** Keep `/Users/toris/projects/product-growth-skills/toris-flutter-play-store-release/` as the only canonical source. Portable Bash entrypoints inspect and bootstrap Flutter projects transactionally; a generated, pinned Fastlane package owns release orchestration; a SHA-pinned GitHub Actions workflow restores secrets only in runner-temporary storage; fixture tests stub all external commands. Manifest-driven installers stage both global copies and roll both back if either destination swap fails.
 
 **Tech Stack:** Bash 3.2-compatible shell, Flutter/Android Gradle (Groovy and Kotlin DSL), Ruby 3.3, Bundler 4.0.16, Fastlane 2.237.0, `fastlane-plugin-firebase_app_distribution` 1.0.0, GitHub Actions, Google Play Developer API, optional Firebase App Distribution and Slack webhook notifications, and Python 3 for repository validation and safe CI archive extraction.
 
@@ -14,7 +14,7 @@
 
 ## Approved source of truth
 
-Implement against `docs/superpowers/specs/2026-07-15-flutter-play-store-release-design.md`.
+Implement against `docs/superpowers/specs/2026-07-15-toris-flutter-play-store-release-design.md`.
 
 Primary implementation sources:
 
@@ -48,7 +48,7 @@ If a current primary source disagrees with this plan, update the design and plan
 Create this canonical package. `tests/` is canonical-only and is excluded from `install-manifest.txt`.
 
 ```text
-flutter-play-store-release/
+toris-flutter-play-store-release/
 ├── .skill-package-id
 ├── SKILL.md
 ├── README.md
@@ -227,7 +227,7 @@ FPRS_TEST_SIGNAL_AT=codec-output|project-write
 
 Production scripts ignore those variables otherwise. Failed transaction tests compare exact bytes, existence, modes, and line endings before/after.
 
-The installation lifecycle may additionally use only `$HOME/.flutter-play-store-release-install-state/` for its shared lock and crash journal plus transaction-specific stage/rollback siblings inside the two destination parents. Remove clean state/stages after success; retain and report only evidence needed for recovery after a failure.
+The installation lifecycle may additionally use only `$HOME/.toris-flutter-play-store-release-install-state/` for its shared lock and crash journal plus transaction-specific stage/rollback siblings inside the two destination parents. Remove clean state/stages after success; retain and report only evidence needed for recovery after a failure.
 
 ---
 
@@ -236,18 +236,18 @@ The installation lifecycle may additionally use only `$HOME/.flutter-play-store-
 **Files:**
 
 - Create: all canonical package paths in the file map
-- Create: `flutter-play-store-release/tests/run_tests.sh`
+- Create: `toris-flutter-play-store-release/tests/run_tests.sh`
 
 - [ ] **Initialize with the official skill creator.**
 
 ```bash
 python3 /Users/toris/.codex/skills/.system/skill-creator/scripts/init_skill.py \
-  flutter-play-store-release \
+  toris-flutter-play-store-release \
   --path /Users/toris/projects/product-growth-skills \
   --resources scripts,references \
-  --interface display_name="Flutter Play Store Release" \
+  --interface display_name="Toris Flutter Play Store Release" \
   --interface short_description="Automate safe Flutter releases to Google Play" \
-  --interface default_prompt="Use \$flutter-play-store-release to inspect this Flutter app, configure safe Android delivery, and verify the Google Play release setup."
+  --interface default_prompt="Use \$toris-flutter-play-store-release to inspect this Flutter app, configure safe Android delivery, and verify the Google Play release setup."
 ```
 
 Expected: normalized directory with initial `SKILL.md` and `agents/openai.yaml`.
@@ -257,7 +257,7 @@ Expected: normalized directory with initial `SKILL.md` and `agents/openai.yaml`.
 Add portable `pass`, `fail`, `assert_file`, `assert_executable`, `assert_contains`, and cleanup helpers. Enumerate every target file, require package ID/schema, require executable entrypoints, require a sorted duplicate-free manifest, and prove `tests/` is excluded.
 
 ```bash
-bash flutter-play-store-release/tests/run_tests.sh package_contract
+bash toris-flutter-play-store-release/tests/run_tests.sh package_contract
 ```
 
 Expected: nonzero naming the first missing target.
@@ -267,7 +267,7 @@ Expected: nonzero naming the first missing target.
 `.skill-package-id`:
 
 ```text
-package_id=flutter-play-store-release
+package_id=toris-flutter-play-store-release
 schema_version=1
 ```
 
@@ -275,9 +275,9 @@ Populate `agents/openai.yaml` exactly:
 
 ```yaml
 interface:
-  display_name: "Flutter Play Store Release"
+  display_name: "Toris Flutter Play Store Release"
   short_description: "Automate safe Flutter releases to Google Play"
-  default_prompt: "Use $flutter-play-store-release to inspect this Flutter app, configure safe Android delivery, and verify the Google Play release setup."
+  default_prompt: "Use $toris-flutter-play-store-release to inspect this Flutter app, configure safe Android delivery, and verify the Google Play release setup."
 ```
 
 `SKILL.md` frontmatter contains only `name` and an English description. Include `## Quick start` and `## Definition of done`. Give every target a valid finished header rather than an unfinished marker. Set shell entrypoints executable.
@@ -289,8 +289,8 @@ List every runtime file in lexical order relative to the package root. Exclude t
 - [ ] **Run package and official validators.**
 
 ```bash
-bash flutter-play-store-release/tests/run_tests.sh package_contract
-python3 /Users/toris/.codex/skills/.system/skill-creator/scripts/quick_validate.py flutter-play-store-release
+bash toris-flutter-play-store-release/tests/run_tests.sh package_contract
+python3 /Users/toris/.codex/skills/.system/skill-creator/scripts/quick_validate.py toris-flutter-play-store-release
 ```
 
 Expected: both pass.
@@ -298,7 +298,7 @@ Expected: both pass.
 - [ ] **Commit.**
 
 ```bash
-git add flutter-play-store-release
+git add toris-flutter-play-store-release
 git commit -m "build flutter Play release skill package"
 ```
 
@@ -308,17 +308,17 @@ git commit -m "build flutter Play release skill package"
 
 **Files:**
 
-- Create: `flutter-play-store-release/scripts/lib/common.sh`
-- Modify: `flutter-play-store-release/scripts/encode_secret.sh`
-- Modify: `flutter-play-store-release/scripts/decode_secret.sh`
-- Modify: `flutter-play-store-release/tests/run_tests.sh`
+- Create: `toris-flutter-play-store-release/scripts/lib/common.sh`
+- Modify: `toris-flutter-play-store-release/scripts/encode_secret.sh`
+- Modify: `toris-flutter-play-store-release/scripts/decode_secret.sh`
+- Modify: `toris-flutter-play-store-release/tests/run_tests.sh`
 
 - [ ] **Add failing codec tests.**
 
 Cover text/binary round trips, stdin/stdout, file/stdout, stdin/file, paths with spaces, empty input, wrapped input, invalid alphabet, truncated padding, output replacement safety, decoded mode `0600`, `umask 077`, ambiguous flags, explicit input preservation, success/error/signal cleanup, stderr redaction, and absence of `set -x`. Use `cmp`; detect BSD/GNU `stat` portably; scan logs for unique canaries.
 
 ```bash
-bash flutter-play-store-release/tests/run_tests.sh secret_codecs
+bash toris-flutter-play-store-release/tests/run_tests.sh secret_codecs
 ```
 
 Expected: nonzero before implementation.
@@ -334,10 +334,10 @@ Detect macOS/GNU Base64 flags without exposing content. Encoding emits one unwra
 - [ ] **Run focused verification.**
 
 ```bash
-bash -n flutter-play-store-release/scripts/lib/common.sh
-bash -n flutter-play-store-release/scripts/encode_secret.sh
-bash -n flutter-play-store-release/scripts/decode_secret.sh
-bash flutter-play-store-release/tests/run_tests.sh secret_codecs
+bash -n toris-flutter-play-store-release/scripts/lib/common.sh
+bash -n toris-flutter-play-store-release/scripts/encode_secret.sh
+bash -n toris-flutter-play-store-release/scripts/decode_secret.sh
+bash toris-flutter-play-store-release/tests/run_tests.sh secret_codecs
 ```
 
 Expected: pass; payload-only stdout and mode `0600`.
@@ -345,7 +345,7 @@ Expected: pass; payload-only stdout and mode `0600`.
 - [ ] **Commit.**
 
 ```bash
-git add flutter-play-store-release/scripts flutter-play-store-release/tests/run_tests.sh
+git add toris-flutter-play-store-release/scripts toris-flutter-play-store-release/tests/run_tests.sh
 git commit -m "implement safe release secret codecs"
 ```
 
@@ -355,15 +355,15 @@ git commit -m "implement safe release secret codecs"
 
 **Files:**
 
-- Modify: `flutter-play-store-release/scripts/inspect_flutter_project.sh`
-- Modify: `flutter-play-store-release/tests/run_tests.sh`
+- Modify: `toris-flutter-play-store-release/scripts/inspect_flutter_project.sh`
+- Modify: `toris-flutter-play-store-release/tests/run_tests.sh`
 
 - [ ] **Create failing inspection fixtures.**
 
 Generate non-Flutter, minimal Groovy, minimal Kotlin, application-ID/namespace mismatch, suffix, multiple/ambiguous flavors, release flavor with entrypoint evidence, Gradle version overrides, build_runner in both dependency sections, existing Fastlane/workflow/signing/Firebase, Firebase package match/mismatch, release-to-debug signing, nested monorepo, dirty/non-Git, and path-with-spaces fixtures. Assert the full JSON schema and human output. Prove secret canaries never appear.
 
 ```bash
-bash flutter-play-store-release/tests/run_tests.sh inspection
+bash toris-flutter-play-store-release/tests/run_tests.sh inspection
 ```
 
 Expected: nonzero on the first missing field.
@@ -385,9 +385,9 @@ Use `fprs_json_escape`; do not require `jq`, Ruby, or Python to run. Tests parse
 - [ ] **Verify and commit.**
 
 ```bash
-bash -n flutter-play-store-release/scripts/inspect_flutter_project.sh
-bash flutter-play-store-release/tests/run_tests.sh inspection
-git add flutter-play-store-release/scripts/inspect_flutter_project.sh flutter-play-store-release/tests/run_tests.sh
+bash -n toris-flutter-play-store-release/scripts/inspect_flutter_project.sh
+bash toris-flutter-play-store-release/tests/run_tests.sh inspection
+git add toris-flutter-play-store-release/scripts/inspect_flutter_project.sh toris-flutter-play-store-release/tests/run_tests.sh
 git commit -m "add Flutter Android project inspection"
 ```
 
@@ -399,10 +399,10 @@ Expected: fixtures pass; ambiguous/non-Flutter failures are clear and leak no se
 
 **Files:**
 
-- Create: `flutter-play-store-release/scripts/lib/project_transaction.sh`
-- Create: `flutter-play-store-release/scripts/lib/gradle_signing.sh`
-- Modify: `flutter-play-store-release/scripts/bootstrap_android_fastlane.sh`
-- Modify: `flutter-play-store-release/tests/run_tests.sh`
+- Create: `toris-flutter-play-store-release/scripts/lib/project_transaction.sh`
+- Create: `toris-flutter-play-store-release/scripts/lib/gradle_signing.sh`
+- Modify: `toris-flutter-play-store-release/scripts/bootstrap_android_fastlane.sh`
+- Modify: `toris-flutter-play-store-release/tests/run_tests.sh`
 
 - [ ] **Write failing transaction and signing tests.**
 
@@ -411,7 +411,7 @@ Cover new Groovy/Kotlin blocks, recognized stock Flutter debug-signing replaceme
 Assert `storeFile`, `storePassword`, `keyAlias`, and `keyPassword` are connected once. The guard must inspect requested release-signing tasks so sync, inspection, and debug builds work without credentials.
 
 ```bash
-bash flutter-play-store-release/tests/run_tests.sh project_transaction gradle_signing
+bash toris-flutter-play-store-release/tests/run_tests.sh project_transaction gradle_signing
 ```
 
 Expected: nonzero before implementation.
@@ -433,11 +433,11 @@ Inspect first. Classify every target as `create`, `update-owned`, `merge`, `pres
 - [ ] **Verify and commit.**
 
 ```bash
-bash -n flutter-play-store-release/scripts/lib/project_transaction.sh
-bash -n flutter-play-store-release/scripts/lib/gradle_signing.sh
-bash -n flutter-play-store-release/scripts/bootstrap_android_fastlane.sh
-bash flutter-play-store-release/tests/run_tests.sh project_transaction gradle_signing bootstrap_core
-git add flutter-play-store-release/scripts flutter-play-store-release/tests/run_tests.sh
+bash -n toris-flutter-play-store-release/scripts/lib/project_transaction.sh
+bash -n toris-flutter-play-store-release/scripts/lib/gradle_signing.sh
+bash -n toris-flutter-play-store-release/scripts/bootstrap_android_fastlane.sh
+bash toris-flutter-play-store-release/tests/run_tests.sh project_transaction gradle_signing bootstrap_core
+git add toris-flutter-play-store-release/scripts toris-flutter-play-store-release/tests/run_tests.sh
 git commit -m "add transactional Android release bootstrap"
 ```
 
@@ -449,23 +449,23 @@ Expected: injected failures report rollback and leave byte-identical fixtures.
 
 **Files:**
 
-- Modify: `flutter-play-store-release/templates/Gemfile`
-- Modify: `flutter-play-store-release/templates/Gemfile.lock`
-- Modify: `flutter-play-store-release/templates/Appfile`
-- Modify: `flutter-play-store-release/templates/Fastfile`
-- Create: `flutter-play-store-release/templates/FlutterPlayStoreRelease.rb`
-- Modify: `flutter-play-store-release/templates/Pluginfile`
-- Modify: `flutter-play-store-release/templates/env.example`
-- Modify: `flutter-play-store-release/templates/key.properties.example`
-- Create: `flutter-play-store-release/tests/fastlane_helper_test.rb`
-- Modify: `flutter-play-store-release/tests/run_tests.sh`
+- Modify: `toris-flutter-play-store-release/templates/Gemfile`
+- Modify: `toris-flutter-play-store-release/templates/Gemfile.lock`
+- Modify: `toris-flutter-play-store-release/templates/Appfile`
+- Modify: `toris-flutter-play-store-release/templates/Fastfile`
+- Create: `toris-flutter-play-store-release/templates/FlutterPlayStoreRelease.rb`
+- Modify: `toris-flutter-play-store-release/templates/Pluginfile`
+- Modify: `toris-flutter-play-store-release/templates/env.example`
+- Modify: `toris-flutter-play-store-release/templates/key.properties.example`
+- Create: `toris-flutter-play-store-release/tests/fastlane_helper_test.rb`
+- Modify: `toris-flutter-play-store-release/tests/run_tests.sh`
 
 - [ ] **Write failing pure Ruby tests first.**
 
 Use standard-library Minitest. Cover approved version shapes, normalization and precedence, one exact-HEAD tag, equivalent `v1.2.3`/`1.2.3` tags, conflicting exact tags, valid plus invalid exact tags, bounded positive codes, remote maximum across every track, successful empty tracks, failed track queries, all-tracks-empty first-release failure, upper bound, build-only fallbacks, target routing, Firebase disabled behavior, `AAB` and `APK` artifact discovery, secret precedence, invalid explicit-path hard failure, owned cleanup, explicit-path preservation, fresh/zero/multiple/stale/flavor-mismatch artifacts, JSON-safe Slack payload, and nonzero `PARTIAL_SUCCESS`.
 
 ```bash
-ruby flutter-play-store-release/tests/fastlane_helper_test.rb
+ruby toris-flutter-play-store-release/tests/fastlane_helper_test.rb
 ```
 
 Expected: load failure before module implementation.
@@ -523,10 +523,10 @@ Mock the Fastlane action adapters, not only pure helpers. Record that `google_pl
 - [ ] **Verify Ruby, Bundler, lanes, and doctor.**
 
 ```bash
-ruby -c flutter-play-store-release/templates/FlutterPlayStoreRelease.rb
-ruby -c flutter-play-store-release/templates/Fastfile
-ruby flutter-play-store-release/tests/fastlane_helper_test.rb
-bash flutter-play-store-release/tests/run_tests.sh fastlane_templates
+ruby -c toris-flutter-play-store-release/templates/FlutterPlayStoreRelease.rb
+ruby -c toris-flutter-play-store-release/templates/Fastfile
+ruby toris-flutter-play-store-release/tests/fastlane_helper_test.rb
+bash toris-flutter-play-store-release/tests/run_tests.sh fastlane_templates
 ```
 
 In an isolated generated fixture with dependencies:
@@ -543,7 +543,7 @@ Expected: syntax/tests pass; intentionally absent credentials produce structured
 - [ ] **Commit.**
 
 ```bash
-git add flutter-play-store-release/templates flutter-play-store-release/tests
+git add toris-flutter-play-store-release/templates toris-flutter-play-store-release/tests
 git commit -m "implement pinned Fastlane Play release lanes"
 ```
 
@@ -553,9 +553,9 @@ git commit -m "implement pinned Fastlane Play release lanes"
 
 **Files:**
 
-- Modify: `flutter-play-store-release/scripts/install_flutter_sdk.sh`
-- Modify: `flutter-play-store-release/templates/release-android.yml`
-- Modify: `flutter-play-store-release/tests/run_tests.sh`
+- Modify: `toris-flutter-play-store-release/scripts/install_flutter_sdk.sh`
+- Modify: `toris-flutter-play-store-release/templates/release-android.yml`
+- Modify: `toris-flutter-play-store-release/tests/run_tests.sh`
 
 - [ ] **Write failing installer and workflow tests.**
 
@@ -566,7 +566,7 @@ Assert release `published` and typed manual triggers; `contents: read`; reposito
 Add injection canaries for version, track, status, distribution target, release tag, and Firebase notes. No expression from `inputs`, release payload, or other untrusted context may be interpolated directly inside a `run:` block: map it to a step-local environment variable, quote it, and validate it first. Assert no `if: secrets.*`, workflow/job-level raw-secret environment, secret command argument, secret output/summary/artifact, or unowned workspace credential file.
 
 ```bash
-bash flutter-play-store-release/tests/run_tests.sh flutter_sdk_installer workflow_template
+bash toris-flutter-play-store-release/tests/run_tests.sh flutter_sdk_installer workflow_template
 ```
 
 Expected: nonzero before implementation.
@@ -605,9 +605,9 @@ Set `SLACK_NOTIFICATION_OWNER=github-actions` and `RELEASE_RESULT_PATH=$RUNNER_T
 - [ ] **Verify and commit.**
 
 ```bash
-bash -n flutter-play-store-release/scripts/install_flutter_sdk.sh
-bash flutter-play-store-release/tests/run_tests.sh flutter_sdk_installer workflow_template
-git add flutter-play-store-release/scripts/install_flutter_sdk.sh flutter-play-store-release/templates/release-android.yml flutter-play-store-release/tests/run_tests.sh
+bash -n toris-flutter-play-store-release/scripts/install_flutter_sdk.sh
+bash toris-flutter-play-store-release/tests/run_tests.sh flutter_sdk_installer workflow_template
+git add toris-flutter-play-store-release/scripts/install_flutter_sdk.sh toris-flutter-play-store-release/templates/release-android.yml toris-flutter-play-store-release/tests/run_tests.sh
 git commit -m "add hardened Flutter Play release workflow"
 ```
 
@@ -619,10 +619,10 @@ Expected: all assertions and available YAML parsing pass; checksum/archive failu
 
 **Files:**
 
-- Modify: `flutter-play-store-release/scripts/bootstrap_android_fastlane.sh`
-- Modify: `flutter-play-store-release/scripts/lib/project_transaction.sh`
-- Modify: all `flutter-play-store-release/templates/` files
-- Modify: `flutter-play-store-release/tests/run_tests.sh`
+- Modify: `toris-flutter-play-store-release/scripts/bootstrap_android_fastlane.sh`
+- Modify: `toris-flutter-play-store-release/scripts/lib/project_transaction.sh`
+- Modify: all `toris-flutter-play-store-release/templates/` files
+- Modify: `toris-flutter-play-store-release/tests/run_tests.sh`
 
 - [ ] **Write failing full-bootstrap tests.**
 
@@ -631,7 +631,7 @@ Cover creation of every generated path, sidecar/body hashes including `Gemfile.l
 Exercise four ownership classes: absent, verified owned, safely mergeable, unowned non-mergeable. Any conflict must cause zero project changes.
 
 ```bash
-bash flutter-play-store-release/tests/run_tests.sh bootstrap_full
+bash toris-flutter-play-store-release/tests/run_tests.sh bootstrap_full
 ```
 
 Expected: nonzero until template population exists.
@@ -668,9 +668,9 @@ Plan all outputs; stage all candidates; validate marker/hash/Ruby/YAML/shell/pla
 - [ ] **Verify idempotency and commit.**
 
 ```bash
-bash flutter-play-store-release/tests/run_tests.sh bootstrap_full
-bash flutter-play-store-release/tests/run_tests.sh bootstrap_full
-git add flutter-play-store-release/scripts flutter-play-store-release/templates flutter-play-store-release/tests/run_tests.sh
+bash toris-flutter-play-store-release/tests/run_tests.sh bootstrap_full
+bash toris-flutter-play-store-release/tests/run_tests.sh bootstrap_full
+git add toris-flutter-play-store-release/scripts toris-flutter-play-store-release/templates toris-flutter-play-store-release/tests/run_tests.sh
 git commit -m "complete idempotent Flutter release bootstrap"
 ```
 
@@ -682,15 +682,15 @@ Expected: both pass; second invocation has no diff and injected failures restore
 
 **Files:**
 
-- Modify: `flutter-play-store-release/scripts/validate_release_setup.sh`
-- Modify: `flutter-play-store-release/tests/run_tests.sh`
+- Modify: `toris-flutter-play-store-release/scripts/validate_release_setup.sh`
+- Modify: `toris-flutter-play-store-release/tests/run_tests.sh`
 
 - [ ] **Write failing validator tests.**
 
 Cover project shape, inspection, required files, markers/hashes, YAML with/without parser, Ruby with/without Ruby, shell syntax, Groovy/Kotlin signing, release-to-debug, ignore entries/example exceptions, active placeholders, credential-shaped content, tracked secret names, optional tools, package mismatch, all contexts, and deterministic `PASS`/`WARN`/`FAIL`. In `doctor` context, prove `pubspec.lock`, `.dart_tool`, generated plugin files, and the full project tree are unchanged. Stub Flutter/Java/Ruby/Bundler/Git/Fastlane and every network tool. Validation must never invoke upload.
 
 ```bash
-bash flutter-play-store-release/tests/run_tests.sh release_validator
+bash toris-flutter-play-store-release/tests/run_tests.sh release_validator
 ```
 
 Expected: nonzero before implementation.
@@ -708,9 +708,9 @@ Share check names/severities with Fastlane doctor for package ID, credential pre
 - [ ] **Verify and commit.**
 
 ```bash
-bash -n flutter-play-store-release/scripts/validate_release_setup.sh
-bash flutter-play-store-release/tests/run_tests.sh release_validator
-git add flutter-play-store-release/scripts/validate_release_setup.sh flutter-play-store-release/tests/run_tests.sh
+bash -n toris-flutter-play-store-release/scripts/validate_release_setup.sh
+bash toris-flutter-play-store-release/tests/run_tests.sh release_validator
+git add toris-flutter-play-store-release/scripts/validate_release_setup.sh toris-flutter-play-store-release/tests/run_tests.sh
 git commit -m "add safe Flutter release setup validation"
 ```
 
@@ -722,11 +722,11 @@ Expected: valid setup exits zero with warnings; hard failures exit one; no exter
 
 **Files:**
 
-- Modify: `flutter-play-store-release/SKILL.md`
-- Modify: `flutter-play-store-release/README.md`
-- Modify: `flutter-play-store-release/templates/PLAY_STORE_RELEASE.md`
-- Modify: all files under `flutter-play-store-release/references/`
-- Modify: `flutter-play-store-release/tests/run_tests.sh`
+- Modify: `toris-flutter-play-store-release/SKILL.md`
+- Modify: `toris-flutter-play-store-release/README.md`
+- Modify: `toris-flutter-play-store-release/templates/PLAY_STORE_RELEASE.md`
+- Modify: all files under `toris-flutter-play-store-release/references/`
+- Modify: `toris-flutter-play-store-release/tests/run_tests.sh`
 
 - [ ] **Write failing documentation contract tests.**
 
@@ -735,7 +735,7 @@ Assert English-only runtime prose, eight modes, English equivalents of every sup
 Assert `SKILL.md` is under 500 lines, one-level reference routing, imperative voice, only `name`/`description` frontmatter, `## Quick start`, and `## Definition of done`.
 
 ```bash
-bash flutter-play-store-release/tests/run_tests.sh documentation
+bash toris-flutter-play-store-release/tests/run_tests.sh documentation
 ```
 
 Expected: nonzero until docs are complete.
@@ -770,9 +770,9 @@ The first-release checklist separates Cloud API enablement, Play service-account
 - [ ] **Verify and commit.**
 
 ```bash
-bash flutter-play-store-release/tests/run_tests.sh documentation
-python3 /Users/toris/.codex/skills/.system/skill-creator/scripts/quick_validate.py flutter-play-store-release
-git add flutter-play-store-release/SKILL.md flutter-play-store-release/README.md flutter-play-store-release/templates/PLAY_STORE_RELEASE.md flutter-play-store-release/references flutter-play-store-release/tests/run_tests.sh
+bash toris-flutter-play-store-release/tests/run_tests.sh documentation
+python3 /Users/toris/.codex/skills/.system/skill-creator/scripts/quick_validate.py toris-flutter-play-store-release
+git add toris-flutter-play-store-release/SKILL.md toris-flutter-play-store-release/README.md toris-flutter-play-store-release/templates/PLAY_STORE_RELEASE.md toris-flutter-play-store-release/references toris-flutter-play-store-release/tests/run_tests.sh
 git commit -m "document Flutter Play release skill workflow"
 ```
 
@@ -784,12 +784,12 @@ Expected: pass; runtime package has no broken local link or machine-specific pat
 
 **Files:**
 
-- Create: `flutter-play-store-release/scripts/lib/package_sync.sh`
-- Modify: `flutter-play-store-release/install.sh`
-- Modify: `flutter-play-store-release/update.sh`
-- Modify: `flutter-play-store-release/uninstall.sh`
-- Modify: `flutter-play-store-release/install-manifest.txt`
-- Modify: `flutter-play-store-release/tests/run_tests.sh`
+- Create: `toris-flutter-play-store-release/scripts/lib/package_sync.sh`
+- Modify: `toris-flutter-play-store-release/install.sh`
+- Modify: `toris-flutter-play-store-release/update.sh`
+- Modify: `toris-flutter-play-store-release/uninstall.sh`
+- Modify: `toris-flutter-play-store-release/install-manifest.txt`
+- Modify: `toris-flutter-play-store-release/tests/run_tests.sh`
 
 - [ ] **Write failing isolated-HOME tests.**
 
@@ -798,7 +798,7 @@ Cover initial install/update/dry-run/explicit source, both destinations, allowli
 Cover crash/journal recovery after old-Claude rename, old-Agents rename, new-Claude install, new-Agents install, final validation, committed-before-cleanup, and each uninstall quarantine phase for initially absent, one-sided, identical, and divergent prior installs. Cover tampered transaction IDs/paths/basenames, uninstall first/second rename, and first/second quarantine-cleanup failures. Use catchable signals plus a killed test process followed by next-invocation recovery. Never use actual user global directories.
 
 ```bash
-bash flutter-play-store-release/tests/run_tests.sh installation
+bash toris-flutter-play-store-release/tests/run_tests.sh installation
 ```
 
 Expected: nonzero before implementation.
@@ -811,9 +811,9 @@ Each installed copy also gets a deterministic `.skill-install-receipt` containin
 
 - [ ] **Implement two-phase install/update.**
 
-Acquire one shared atomic lifecycle lock at `$HOME/.flutter-play-store-release-install-state/lock` for install/update/uninstall. Require the state root to be a non-symlink mode-`0700` directory owned by the current user with known entries only. Store an owner token, host, PID, and safe process identity; remove it only when the current token owns it. Refuse a live lock. Reclaim a same-host stale lock only after proving its recorded process is absent; otherwise report the manual verification path. A concurrent-process test must prove operations cannot interleave.
+Acquire one shared atomic lifecycle lock at `$HOME/.toris-flutter-play-store-release-install-state/lock` for install/update/uninstall. Require the state root to be a non-symlink mode-`0700` directory owned by the current user with known entries only. Store an owner token, host, PID, and safe process identity; remove it only when the current token owns it. Refuse a live lock. Reclaim a same-host stale lock only after proving its recorded process is absent; otherwise report the manual verification path. A concurrent-process test must prove operations cannot interleave.
 
-Create private stages and rollback directories inside each destination parent. Copy/hash both stages and generate receipts before mutation. Persist `$HOME/.flutter-play-store-release-install-state/transaction` atomically before the first rename and after every phase. Rename old installs to rollback names, install Claude then Agents copies, validate final manifests/receipts/cross-copy equality, then atomically record `committed` before cleanup. On catchable pre-commit failure restore both and return status three. On startup under the lock, a pre-commit journal restores the exact old state; a committed journal preserves/revalidates the new copies and only finishes rollback/stage cleanup. If either recovery cannot be proved, retain all evidence and stop with a recovery report. Delete journal, rollbacks, and empty state directory only after the corresponding recovery/cleanup completes.
+Create private stages and rollback directories inside each destination parent. Copy/hash both stages and generate receipts before mutation. Persist `$HOME/.toris-flutter-play-store-release-install-state/transaction` atomically before the first rename and after every phase. Rename old installs to rollback names, install Claude then Agents copies, validate final manifests/receipts/cross-copy equality, then atomically record `committed` before cleanup. On catchable pre-commit failure restore both and return status three. On startup under the lock, a pre-commit journal restores the exact old state; a committed journal preserves/revalidates the new copies and only finishes rollback/stage cleanup. If either recovery cannot be proved, retain all evidence and stop with a recovery report. Delete journal, rollbacks, and empty state directory only after the corresponding recovery/cleanup completes.
 
 The journal is a strict `key=value` file with only: `schema_version`, `package_id`, `transaction_id`, `operation`, `phase`, `claude_existed`, `claude_destination`, `claude_stage`, `claude_rollback`, `claude_quarantine`, `agents_existed`, `agents_destination`, `agents_stage`, `agents_rollback`, and `agents_quarantine`. Reject unknown/duplicate keys instead of sourcing the file as shell code. Before any recovery rename/delete, validate package/schema/transaction ID and require every nonempty stage/rollback/quarantine path to be under the exact corresponding destination parent with the transaction-specific generated basename. Install/update phases are `staged`, `claude_old_moved`, `agents_old_moved`, `claude_new_installed`, `agents_new_installed`, `validated`, `committed`; uninstall phases are `planned`, `claude_quarantined`, `agents_quarantined`, `committed`, `cleanup_complete`.
 
@@ -826,12 +826,12 @@ Require `--yes` for mutation. Both absent is an idempotent success; one present 
 - [ ] **Verify and commit.**
 
 ```bash
-bash -n flutter-play-store-release/scripts/lib/package_sync.sh
-bash -n flutter-play-store-release/install.sh
-bash -n flutter-play-store-release/update.sh
-bash -n flutter-play-store-release/uninstall.sh
-bash flutter-play-store-release/tests/run_tests.sh installation
-git add flutter-play-store-release/install.sh flutter-play-store-release/update.sh flutter-play-store-release/uninstall.sh flutter-play-store-release/install-manifest.txt flutter-play-store-release/scripts/lib/package_sync.sh flutter-play-store-release/tests/run_tests.sh
+bash -n toris-flutter-play-store-release/scripts/lib/package_sync.sh
+bash -n toris-flutter-play-store-release/install.sh
+bash -n toris-flutter-play-store-release/update.sh
+bash -n toris-flutter-play-store-release/uninstall.sh
+bash toris-flutter-play-store-release/tests/run_tests.sh installation
+git add toris-flutter-play-store-release/install.sh toris-flutter-play-store-release/update.sh toris-flutter-play-store-release/uninstall.sh toris-flutter-play-store-release/install-manifest.txt toris-flutter-play-store-release/scripts/lib/package_sync.sh toris-flutter-play-store-release/tests/run_tests.sh
 git commit -m "add atomic global skill installation"
 ```
 
@@ -846,14 +846,14 @@ Expected: lock, receipt, phase-fault, killed-process recovery, and uninstall-qua
 - Modify: `scripts/validate_skills.py`
 - Modify: `README.md`
 - Modify: `CONTRIBUTING.md` only if package-test guidance is needed
-- Modify: `flutter-play-store-release/tests/run_tests.sh`
+- Modify: `toris-flutter-play-store-release/tests/run_tests.sh`
 
 - [ ] **Write failing repository expectations.**
 
-Require the root introduction/count/table/install loop/prompt/tree/validation examples to name `flutter-play-store-release`. Require the validator to expect exactly seven skills and allow this standalone package's local execution policy without weakening policy-link checks for the existing six.
+Require the root introduction/count/table/install loop/prompt/tree/validation examples to name `toris-flutter-play-store-release`. Require the validator to expect exactly seven skills and allow this standalone package's local execution policy without weakening policy-link checks for the existing six.
 
 ```bash
-bash flutter-play-store-release/tests/run_tests.sh repository_integration
+bash toris-flutter-play-store-release/tests/run_tests.sh repository_integration
 python3 scripts/validate_skills.py
 ```
 
@@ -873,9 +873,9 @@ Change six to seven; add row, install loop entry, personal prompt, structure tre
 
 ```bash
 python3 scripts/validate_skills.py
-bash flutter-play-store-release/tests/run_tests.sh repository_integration documentation package_contract
-python3 /Users/toris/.codex/skills/.system/skill-creator/scripts/quick_validate.py flutter-play-store-release
-git add README.md CONTRIBUTING.md scripts/validate_skills.py flutter-play-store-release/tests/run_tests.sh
+bash toris-flutter-play-store-release/tests/run_tests.sh repository_integration documentation package_contract
+python3 /Users/toris/.codex/skills/.system/skill-creator/scripts/quick_validate.py toris-flutter-play-store-release
+git add README.md CONTRIBUTING.md scripts/validate_skills.py toris-flutter-play-store-release/tests/run_tests.sh
 git commit -m "integrate Flutter Play release skill"
 ```
 
@@ -894,7 +894,7 @@ Expected: `Validated 7 skills successfully.` and all package checks pass. Do not
 
 ```bash
 env -i HOME="$HOME" PATH="$PATH" LANG=C LC_ALL=C \
-  bash flutter-play-store-release/tests/run_tests.sh
+  bash toris-flutter-play-store-release/tests/run_tests.sh
 ```
 
 Expected: every named group passes with zero external-contact markers.
@@ -902,12 +902,12 @@ Expected: every named group passes with zero external-contact markers.
 - [ ] **Run syntax, dependency, and repository checks.**
 
 ```bash
-find flutter-play-store-release -type f -name '*.sh' -exec bash -n {} \;
-ruby -c flutter-play-store-release/templates/Fastfile
-ruby -c flutter-play-store-release/templates/FlutterPlayStoreRelease.rb
-ruby flutter-play-store-release/tests/fastlane_helper_test.rb
+find toris-flutter-play-store-release -type f -name '*.sh' -exec bash -n {} \;
+ruby -c toris-flutter-play-store-release/templates/Fastfile
+ruby -c toris-flutter-play-store-release/templates/FlutterPlayStoreRelease.rb
+ruby toris-flutter-play-store-release/tests/fastlane_helper_test.rb
 python3 scripts/validate_skills.py
-python3 /Users/toris/.codex/skills/.system/skill-creator/scripts/quick_validate.py flutter-play-store-release
+python3 /Users/toris/.codex/skills/.system/skill-creator/scripts/quick_validate.py toris-flutter-play-store-release
 ```
 
 Expected: all pass. In a disposable generated project, also run `BUNDLE_FROZEN=true bundle check`, `bundle exec fastlane lanes`, and build-context doctor when pinned dependencies are installed. Run `actionlint` when available; otherwise record it as not run with its installation command.
@@ -917,9 +917,9 @@ Expected: all pass. In a disposable generated project, also run `BUNDLE_FROZEN=t
 ```bash
 git diff --check
 git status --short
-rg -n 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|"private_key"\s*:\s*"-----BEGIN|AIza[0-9A-Za-z_-]{20,}|gh[pousr]_[0-9A-Za-z]{20,}' flutter-play-store-release
-python3 -c 'import pathlib,re; p=pathlib.Path("flutter-play-store-release/templates/release-android.yml"); refs=re.findall(r"uses:\s*([^\s#]+)",p.read_text()); bad=[r for r in refs if not (r.startswith("./") or re.fullmatch(r"[^@]+@[0-9a-f]{40}",r))]; raise SystemExit(f"mutable action refs: {bad}" if bad else 0)'
-rg -n '/Users/|set -x|GITHUB_ENV|GITHUB_OUTPUT' flutter-play-store-release
+rg -n 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|"private_key"\s*:\s*"-----BEGIN|AIza[0-9A-Za-z_-]{20,}|gh[pousr]_[0-9A-Za-z]{20,}' toris-flutter-play-store-release
+python3 -c 'import pathlib,re; p=pathlib.Path("toris-flutter-play-store-release/templates/release-android.yml"); refs=re.findall(r"uses:\s*([^\s#]+)",p.read_text()); bad=[r for r in refs if not (r.startswith("./") or re.fullmatch(r"[^@]+@[0-9a-f]{40}",r))]; raise SystemExit(f"mutable action refs: {bad}" if bad else 0)'
+rg -n '/Users/|set -x|GITHUB_ENV|GITHUB_OUTPUT' toris-flutter-play-store-release
 ```
 
 Expected: no credential/key, floating action, runtime machine path, tracing, or workflow secret-output use. Manually review expected documentation statements about forbidden output files.
@@ -958,8 +958,8 @@ Do not create an empty commit.
 **Files:**
 
 - Create via the authorized installer:
-  - `~/.claude/skills/flutter-play-store-release/`
-  - `~/.agents/skills/flutter-play-store-release/`
+  - `~/.claude/skills/toris-flutter-play-store-release/`
+  - `~/.agents/skills/toris-flutter-play-store-release/`
 - Modify repository only if final verification exposes a defect
 
 - [ ] **Confirm repository readiness.**
@@ -967,7 +967,7 @@ Do not create an empty commit.
 ```bash
 git status --short --branch
 python3 scripts/validate_skills.py
-bash flutter-play-store-release/tests/run_tests.sh
+bash toris-flutter-play-store-release/tests/run_tests.sh
 ```
 
 Expected: clean tracked state, intended commits only, seven skills, all tests passing.
@@ -975,8 +975,8 @@ Expected: clean tracked state, intended commits only, seven skills, all tests pa
 - [ ] **Preview and perform the approved installation.**
 
 ```bash
-flutter-play-store-release/install.sh --source "$PWD/flutter-play-store-release" --dry-run
-flutter-play-store-release/install.sh --source "$PWD/flutter-play-store-release"
+toris-flutter-play-store-release/install.sh --source "$PWD/toris-flutter-play-store-release" --dry-run
+toris-flutter-play-store-release/install.sh --source "$PWD/toris-flutter-play-store-release"
 ```
 
 Expected: only the two exact global destinations are changed; no symlink.

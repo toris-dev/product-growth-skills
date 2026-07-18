@@ -28,6 +28,8 @@ tool/flutter-play-store-release/install_flutter_sdk.sh
 tool/flutter-play-store-release/managed-files.sha256
 ```
 
+These `tool/flutter-play-store-release` paths and their ownership metadata are a stable project-internal compatibility namespace. The agent skill itself is invoked and installed as `toris-flutter-play-store-release`.
+
 Do not edit a fully owned file without expecting the next repair to report a hash conflict. Keep real `.env`, `android/key.properties`, keystores, service-account JSON, Fastlane output, and decoded credentials ignored and uncommitted.
 
 ## 3. Play Console setup
@@ -124,7 +126,7 @@ Record the first manual AAB result without recording credentials. Automation mus
 Run a read-only readiness check from the project root:
 
 ```bash
-SKILL_ROOT=/path/to/installed/flutter-play-store-release
+SKILL_ROOT=/path/to/installed/toris-flutter-play-store-release
 "$SKILL_ROOT/scripts/validate_release_setup.sh" \
   --project . --context doctor --format human
 ```

@@ -1,15 +1,15 @@
 ---
-name: flutter-play-store-release
+name: toris-flutter-play-store-release
 description: Inspect, configure, validate, repair, build, and safely operate Flutter Android delivery through Fastlane and GitHub Actions for Google Play, Firebase App Distribution, and Slack.
 ---
 
-# Flutter Play Store Release
+# Toris Flutter Play Store Release
 
 Operate the Android release path of a Flutter project. Treat this skill as Android only; exclude iOS and App Store work. Write runtime documentation and configuration in English, then report results in the user's language.
 
 ## Quick start
 
-1. Invoke `/flutter-play-store-release` in Claude Code or `$flutter-play-store-release` in Codex.
+1. Invoke `/toris-flutter-play-store-release` in Claude Code or `$toris-flutter-play-store-release` in Codex.
 2. Identify the Flutter project root and the user's requested outcome.
 3. Inspect before editing. Run `scripts/inspect_flutter_project.sh --project PATH --format human` from this skill's installed directory.
 4. Classify the request into one mode and apply the narrowest authorized workflow.
@@ -52,7 +52,7 @@ A `setup`, `doctor`, `build`, `ci`, `firebase-distribution`, `slack`, or `repair
 Inspect before editing.
 
 ```bash
-SKILL_ROOT=/path/to/installed/flutter-play-store-release
+SKILL_ROOT=/path/to/installed/toris-flutter-play-store-release
 "$SKILL_ROOT/scripts/inspect_flutter_project.sh" --project PATH --format human
 "$SKILL_ROOT/scripts/bootstrap_android_fastlane.sh" --project PATH --dry-run
 ```
@@ -103,6 +103,8 @@ Use `--flavor NAME` only after the release flavor is confirmed. Use `--conflict 
 - `.github/workflows/release-android.yml`
 - `docs/PLAY_STORE_RELEASE.md`
 - `tool/flutter-play-store-release/decode_secret.sh`, `install_flutter_sdk.sh`, and `managed-files.sha256`
+
+Keep `tool/flutter-play-store-release`, its sidecar package ID, and generated ownership markers unchanged. They are a stable project-internal compatibility namespace retained across the public skill rename to `toris-flutter-play-store-release`.
 
 ### Doctor
 
